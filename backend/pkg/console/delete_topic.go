@@ -23,7 +23,11 @@ import (
 
 // DeleteTopic deletes a Kafka Topic (if possible and not disabled).
 func (s *Service) DeleteTopic(ctx context.Context, topicName string) *rest.Error {
-	res, err := s.kafkaSvc.DeleteTopics(ctx, []string{topicName})
+	req := kmsg.NewDeleteTopicsRequest()
+	req.TopicNames = []string{topicName}
+	req.TimeoutMillis = 30 * 1000 // 30s
+
+	res, err := s.kafkaSvc.DeleteTopics(ctx, &req)
 	if err != nil {
 		return &rest.Error{
 			Err:          err,
@@ -45,8 +49,7 @@ func (s *Service) DeleteTopic(ctx context.Context, topicName string) *rest.Error
 	}
 
 	topicRes := res.Topics[0]
-	err = kerr.ErrorForCode(topicRes.ErrorCode)
-	if err != nil {
+	if err := newKafkaErrorWithDynamicMessage(topicRes.ErrorCode, topicRes.ErrorMessage); err != nil {
 		return &rest.Error{
 			Err:          err,
 			Status:       http.StatusServiceUnavailable,
@@ -59,11 +62,19 @@ func (s *Service) DeleteTopic(ctx context.Context, topicName string) *rest.Error
 	return nil
 }
 
+// DeleteTopics proxies the Kafka request/response between the Console service and Kafka.
+func (s *Service) DeleteTopics(ctx context.Context, req *kmsg.DeleteTopicsRequest) (*kmsg.DeleteTopicsResponse, error) {
+	return s.kafkaSvc.DeleteTopics(ctx, req)
+}
+
+// DeleteTopicRecordsResponse is the response to deleting a Kafka topic.
 type DeleteTopicRecordsResponse struct {
 	TopicName  string                                `json:"topicName"`
 	Partitions []DeleteTopicRecordsResponsePartition `json:"partitions"`
 }
 
+// DeleteTopicRecordsResponsePartition os the partition-scoped response to deleting
+// a Kafka topic.
 type DeleteTopicRecordsResponsePartition struct {
 	PartitionID  int32  `json:"partitionId"`
 	LowWaterMark int64  `json:"lowWaterMark"`

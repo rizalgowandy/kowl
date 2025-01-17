@@ -9,467 +9,794 @@
  * by the Apache License, Version 2.0
  */
 
-/* eslint-disable no-useless-escape */
-import { Button, message, Tooltip } from 'antd';
-import { motion } from 'framer-motion';
-import { autorun, IReactionDisposer, makeObservable, observable, untracked } from 'mobx';
-import { observer } from 'mobx-react';
-import { Component, CSSProperties } from 'react';
+import { comparer, observable, transaction } from 'mobx';
+import { observer, useLocalObservable } from 'mobx-react';
+import React, { useEffect, useState } from 'react';
 import { appGlobal } from '../../../state/appGlobal';
-import { api } from '../../../state/backendApi';
-import { ClusterConnectorInfo } from '../../../state/restInterfaces';
-import { uiSettings } from '../../../state/ui';
-import { animProps } from '../../../utils/animationProps';
-import { Code, findPopupContainer } from '../../../utils/tsxUtils';
-import Card from '../../misc/Card';
-import { sortField } from '../../misc/common';
-import { KowlTable } from '../../misc/KowlTable';
-import { PageComponent, PageInitHelper } from '../Page';
-
-
+import { type MessageSearch, type MessageSearchRequest, api, createMessageSearch } from '../../../state/backendApi';
+import { ConnectClusterStore } from '../../../state/connect/state';
+import {
+  type ClusterConnectorInfo,
+  type ClusterConnectorTaskInfo,
+  type ConnectorError,
+  DataType,
+  PropertyImportance,
+  type TopicMessage,
+} from '../../../state/restInterfaces';
+import { Code, TimestampDisplay } from '../../../utils/tsxUtils';
+import { PageComponent, type PageInitHelper } from '../Page';
+import { ConfigPage } from './dynamic-ui/components';
 import './helper';
+import {
+  Alert,
+  AlertIcon,
+  Box,
+  Button,
+  CodeBlock,
+  DataTable,
+  Flex,
+  Grid,
+  Heading,
+  ModalBody,
+  ModalCloseButton,
+  ModalContent,
+  ModalFooter,
+  ModalHeader,
+  ModalOverlay,
+  Modal as RPModal,
+  SearchField,
+  Skeleton,
+  Tabs,
+  Text,
+  Tooltip,
+  useDisclosure,
+} from '@redpanda-data/ui';
+import type { ColumnDef } from '@tanstack/react-table';
+import usePaginationParams from '../../../hooks/usePaginationParams';
+import { PayloadEncoding } from '../../../protogen/redpanda/api/console/v1alpha1/common_pb';
+import { PartitionOffsetOrigin, uiSettings } from '../../../state/ui';
+import { uiState } from '../../../state/uiState';
+import { sanitizeString } from '../../../utils/filterHelper';
+import { delay, encodeBase64, titleCase } from '../../../utils/utils';
+import PageContent from '../../misc/PageContent';
+import Section from '../../misc/Section';
+import { MessagePreview } from '../topics/Tab.Messages';
+import { ExpandedMessage } from '../topics/Tab.Messages';
+import { getConnectorFriendlyName } from './ConnectorBoxCard';
+import { ConfirmModal, NotConfigured, TaskState, statusColors } from './helper';
 
-// React Editor
-import Editor from "@monaco-editor/react";
+const LOGS_TOPIC_NAME = '__redpanda.connectors_logs';
 
-// Monaco Type
-import * as monacoType from 'monaco-editor/esm/vs/editor/editor.api';
-import { ConfirmModal, ConnectorStatisticsCard, NotConfigured, okIcon, TaskState, warnIcon } from './helper';
-export type Monaco = typeof monacoType;
-
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-// const monacoProtoLint = require('monaco-proto-lint');
-
-// const protoLangConf: monacoType.languages.LanguageConfiguration = {
-//     indentationRules: {
-//         // ^.*\{[^}'']*$
-//         increaseIndentPattern: /^.*\{[^}'']*$/,
-//         // ^(.*\*/)?\s*\}.*$
-//         decreaseIndentPattern: /^(.*\*\/)?\s*\}.*$/,
-//     },
-//     wordPattern: /(-?\d*\.\d\w*)|([^`~!@#%^&*()\-=+[{\]}\\|;:'",.<>/?\s]+)(\.proto){0,1}/g,
-//     comments: {
-//         lineComment: '//',
-//         blockComment: ['/*', '*/']
-//     },
-//     brackets: [
-//         ['{', '}'],
-//         ['[', ']'],
-//         ['(', ')'],
-//         ['<', '>'],
-//     ],
-//     folding: {
-//         markers: {
-//             start: new RegExp("^\\s*<!--\\s*#?region\\b.*-->"),
-//             end: new RegExp("^\\s*<!--\\s*#?endregion\\b.*-->")
-//         },
-//         offSide: true,
-//     }
-// }
-
-
-function onBeforeEditorMount(m: Monaco) {
-    // monacoProtoLint.default(m);
-    // m.languages.setLanguageConfiguration('protobuf', protoLangConf);
-
-    // m.editor.defineTheme('proto-custom', {
-    //     base: 'vs',
-    //     inherit: true,
-    //     rules: [
-    //         { token: 'comment', foreground: '#66747B' }
-    //     ],
-    //     colors: {
-    //         "comment": "#66747B",
-    //         "editorLineNumber.foreground": "#aaa",
-    //     }
-    // })
+export type UpdatingConnectorData = { clusterName: string; connectorName: string };
+export type RestartingTaskData = { clusterName: string; connectorName: string; taskId: number };
+interface LocalConnectorState {
+  pausingConnector: ClusterConnectorInfo | null;
+  restartingConnector: ClusterConnectorInfo | null;
+  updatingConnector: UpdatingConnectorData | null;
+  restartingTask: RestartingTaskData | null;
+  deletingConnector: string | null;
 }
+const KafkaConnectorMain = observer(
+  ({
+    clusterName,
+    connectorName,
+    refreshData,
+  }: {
+    clusterName: string;
+    connectorName: string;
+    refreshData: (force: boolean) => Promise<void>;
+  }) => {
+    const [connectClusterStore] = useState(ConnectClusterStore.getInstance(clusterName));
 
-function onMountEditor(editor: any, monaco: any) {
-    // editor is actually type: monaco.editor.IStandaloneCodeEditor
-    // editor.setValue(logText);
-}
+    const logsTopic = api.topics?.first((x) => x.topicName === LOGS_TOPIC_NAME);
 
+    useEffect(() => {
+      const init = async () => {
+        await connectClusterStore.setup();
+      };
+      init();
+    }, [connectClusterStore]);
 
-type UpdatingConnectorData = { clusterName: string; connector: ClusterConnectorInfo; newConfigObj: any };
-type RestartingTaskData = { clusterName: string; connectorName: string; taskId: number; };
+    const $state = useLocalObservable<LocalConnectorState>(() => ({
+      pausingConnector: null,
+      restartingConnector: null,
+      updatingConnector: null,
+      restartingTask: null,
+      deletingConnector: null,
+    }));
+    if (!connectClusterStore.isInitialized) {
+      return <Skeleton mt={5} noOfLines={20} height={4} />;
+    }
+
+    const connectorStore = connectClusterStore.getConnectorStore(connectorName);
+
+    const connector = connectClusterStore.getRemoteConnector(connectorName);
+
+    const canEdit = connectClusterStore.canEdit;
+    if (!connector) return null;
+
+    return (
+      <>
+        {/* [Pause] [Restart] [Delete] */}
+        <Flex flexDirection="row" alignItems="center" gap="3">
+          {/* [Pause/Resume] */}
+          {connectClusterStore.validateConnectorState(connectorName, ['RUNNING', 'PAUSED']) ? (
+            <Tooltip
+              placement="top"
+              isDisabled={canEdit !== true}
+              label={"You don't have 'canEditConnectCluster' permissions for this connect cluster"}
+              hasArrow={true}
+            >
+              <Button
+                isDisabled={!canEdit}
+                onClick={() => ($state.pausingConnector = connector)}
+                variant="outline"
+                minWidth="32"
+              >
+                {connectClusterStore.validateConnectorState(connectorName, ['RUNNING']) ? 'Pause' : 'Resume'}
+              </Button>
+            </Tooltip>
+          ) : null}
+
+          {/* [Restart] */}
+          <Tooltip
+            placement="top"
+            isDisabled={canEdit !== true}
+            label={"You don't have 'canEditConnectCluster' permissions for this connect cluster"}
+            hasArrow={true}
+          >
+            <Button
+              isDisabled={!canEdit}
+              onClick={() => ($state.restartingConnector = connector)}
+              variant="outline"
+              minWidth="32"
+            >
+              Restart
+            </Button>
+          </Tooltip>
+
+          {/* [Delete] */}
+          <Tooltip
+            placement="top"
+            isDisabled={canEdit !== true}
+            label={"You don't have 'canEditConnectCluster' permissions for this connect cluster"}
+            hasArrow={true}
+          >
+            <Button
+              variant="outline"
+              colorScheme="red"
+              isDisabled={!canEdit}
+              onClick={() => ($state.deletingConnector = connectorName)}
+              minWidth="32"
+            >
+              Delete
+            </Button>
+          </Tooltip>
+        </Flex>
+
+        <Tabs
+          marginBlock="2"
+          size="lg"
+          items={[
+            {
+              key: 'overview',
+              name: 'Overview',
+              component: (
+                <Box mt="8">
+                  <ConfigOverviewTab
+                    clusterName={clusterName}
+                    connectClusterStore={connectClusterStore}
+                    connector={connector}
+                  />
+                </Box>
+              ),
+            },
+            {
+              key: 'configuration',
+              name: 'Configuration',
+              component: (
+                <Box mt="8">
+                  <Box maxWidth="800px">
+                    {connectorStore && <ConfigPage connectorStore={connectorStore} context="EDIT" />}
+                  </Box>
+
+                  {/* Update Config Button */}
+                  <Flex m={4} mb={6}>
+                    <Tooltip
+                      placement="top"
+                      isDisabled={canEdit !== true}
+                      label={"You don't have 'canEditConnectCluster' permissions for this connect cluster"}
+                      hasArrow={true}
+                    >
+                      <Button
+                        variant="outline"
+                        style={{ width: '200px' }}
+                        isDisabled={(() => {
+                          if (!canEdit) return true;
+                          if (!connector) return true;
+                          const connectorConfigObject = connectorStore?.getConfigObject();
+                          if (connectorConfigObject && comparer.shallow(connector.config, connectorConfigObject)) {
+                            return true;
+                          }
+                        })()}
+                        onClick={() => {
+                          $state.updatingConnector = { clusterName, connectorName };
+                        }}
+                      >
+                        Update Config
+                      </Button>
+                    </Tooltip>
+                  </Flex>
+                </Box>
+              ),
+            },
+            {
+              key: 'logs',
+              name: 'Logs',
+              isDisabled: logsTopic ? false : `Logs topic '${LOGS_TOPIC_NAME}' does not exist.`,
+              component: (
+                <Box mt="8">
+                  <LogsTab clusterName={clusterName} connectClusterStore={connectClusterStore} connector={connector} />
+                </Box>
+              ),
+            },
+          ]}
+        />
+
+        {/* Pause/Resume Modal */}
+        <ConfirmModal<ClusterConnectorInfo>
+          target={() => $state.pausingConnector}
+          clearTarget={() => ($state.pausingConnector = null)}
+          content={(c) => (
+            <>
+              {connectClusterStore.validateConnectorState(connectorName, ['RUNNING']) ? 'Pause' : 'Resume'} connector{' '}
+              <strong>{c.name}</strong>?
+            </>
+          )}
+          successMessage={(c) => (
+            <>
+              {connectClusterStore.validateConnectorState(connectorName, ['RUNNING']) ? 'Resumed' : 'Paused'} connector{' '}
+              <strong>{c.name}</strong>
+            </>
+          )}
+          onOk={async (c) => {
+            if (connectClusterStore.validateConnectorState(connectorName, ['RUNNING']))
+              await api.pauseConnector(clusterName, c.name);
+            else await api.resumeConnector(clusterName, c.name);
+            await delay(500);
+            await refreshData(true);
+          }}
+        />
+
+        {/* Restart */}
+        <ConfirmModal<ClusterConnectorInfo>
+          target={() => $state.restartingConnector}
+          clearTarget={() => ($state.restartingConnector = null)}
+          content={(c) => (
+            <>
+              Restart connector <strong>{c.name}</strong>?
+            </>
+          )}
+          successMessage={(c) => (
+            <>
+              Successfully restarted connector <strong>{c.name}</strong>
+            </>
+          )}
+          onOk={async (c) => {
+            await api.restartConnector(clusterName, c.name);
+            await refreshData(true);
+          }}
+        />
+
+        {/* Update Config */}
+        <ConfirmModal<UpdatingConnectorData>
+          target={() => $state.updatingConnector}
+          clearTarget={() => ($state.updatingConnector = null)}
+          content={(c) => (
+            <>
+              Update configuration of connector <strong>{c.connectorName}</strong>?
+            </>
+          )}
+          successMessage={(c) => (
+            <>
+              Successfully updated config of <strong>{c.connectorName}</strong>
+            </>
+          )}
+          onOk={async (c) => {
+            connectClusterStore.getConnectorStore(c.connectorName);
+            await connectClusterStore.updateConnnector(c.connectorName);
+            appGlobal.history.push(`/connect-clusters/${encodeURIComponent(clusterName)}`);
+            await refreshData(true);
+          }}
+        />
+
+        {/* Restart Task */}
+        <ConfirmModal<RestartingTaskData>
+          target={() => $state.restartingTask}
+          clearTarget={() => ($state.restartingTask = null)}
+          content={(c) => (
+            <>
+              Restart task <strong>{c.taskId}</strong> of <strong>{c.connectorName}</strong>?
+            </>
+          )}
+          successMessage={(c) => (
+            <>
+              Successfully restarted <strong>{c.taskId}</strong> of <strong>{c.connectorName}</strong>
+            </>
+          )}
+          onOk={async (c) => {
+            await api.restartTask(c.clusterName, c.connectorName, c.taskId);
+            await refreshData(true);
+          }}
+        />
+
+        {/* Delete Connector */}
+        <ConfirmModal<string>
+          target={() => $state.deletingConnector}
+          clearTarget={() => ($state.deletingConnector = null)}
+          content={(c) => (
+            <>
+              Delete connector <strong>{c}</strong>?
+            </>
+          )}
+          successMessage={(c) => (
+            <>
+              Deleted connector <strong>{c}</strong>
+            </>
+          )}
+          onOk={async (_connectorName) => {
+            await connectClusterStore.deleteConnector(connectorName);
+            await refreshData(true);
+            appGlobal.history.push(`/connect-clusters/${encodeURIComponent(clusterName)}`);
+          }}
+        />
+      </>
+    );
+  },
+);
+
+const ConfigOverviewTab = observer(
+  (p: {
+    clusterName: string;
+    connectClusterStore: ConnectClusterStore;
+    connector: ClusterConnectorInfo;
+  }) => {
+    const { connectClusterStore, connector } = p;
+    const connectorName = connector.name;
+
+    return (
+      <>
+        <Grid
+          templateAreas={`
+                "errors errors"
+                "health details"
+                "tasks details"
+            `}
+          gridTemplateRows="auto"
+          alignItems="start"
+          gap="6"
+        >
+          <Flex gridArea="errors" flexDirection="column" gap="2">
+            {connector.errors.map((e) => (
+              <ConnectorErrorModal key={e.title} error={e} />
+            ))}
+          </Flex>
+
+          <Section gridArea="health">
+            <Flex flexDirection="row" gap="4" m="1">
+              <Box width="5px" borderRadius="3px" background={statusColors[connector.status]} />
+
+              <Flex flexDirection="column">
+                <Text fontWeight="semibold" fontSize="3xl">
+                  {titleCase(connector.status)}
+                </Text>
+                <Text opacity=".5">Status</Text>
+              </Flex>
+            </Flex>
+          </Section>
+
+          <Section py={4} gridArea="tasks" minWidth="500px">
+            <Flex alignItems="center" mt="2" mb="6" gap="2">
+              <Heading as="h3" fontSize="1rem" fontWeight="semibold" textTransform="uppercase" color="blackAlpha.800">
+                Tasks
+              </Heading>
+              <Text opacity=".5" fontWeight="normal">
+                ({connectClusterStore.getConnectorTasks(connectorName)?.length || 0})
+              </Text>
+            </Flex>
+            <DataTable<ClusterConnectorTaskInfo>
+              data={connectClusterStore.getConnectorTasks(connectorName) ?? []}
+              pagination
+              defaultPageSize={10}
+              sorting
+              columns={[
+                {
+                  header: 'Task',
+                  accessorKey: 'taskId',
+                  size: 200,
+                  cell: ({
+                    row: {
+                      original: { taskId },
+                    },
+                  }) => <Code nowrap>Task-{taskId}</Code>,
+                },
+                {
+                  header: 'Status',
+                  accessorKey: 'state',
+                  cell: ({ row: { original } }) => <TaskState observable={original} />,
+                },
+                {
+                  header: 'Worker',
+                  accessorKey: 'workerId',
+                  cell: ({ row: { original } }) => <Code nowrap>{original.workerId}</Code>,
+                },
+              ]}
+            />
+          </Section>
+
+          <Section py={4} gridArea="details">
+            <Heading
+              as="h3"
+              mb="6"
+              mt="2"
+              fontSize="1rem"
+              fontWeight="semibold"
+              textTransform="uppercase"
+              color="blackAlpha.800"
+            >
+              Connector Details
+            </Heading>
+
+            <ConnectorDetails
+              clusterName={p.clusterName}
+              connectClusterStore={connectClusterStore}
+              connector={connector}
+            />
+          </Section>
+        </Grid>
+      </>
+    );
+  },
+);
+
+const ConnectorErrorModal = observer((p: { error: ConnectorError }) => {
+  const { isOpen, onOpen, onClose } = useDisclosure();
+
+  const errorType = p.error.type === 'ERROR' ? 'error' : 'warning';
+
+  const hasConnectorLogs = api.topics?.any((x) => x.topicName === LOGS_TOPIC_NAME);
+
+  return (
+    <>
+      <Alert status={errorType} variant="solid" height="12" borderRadius="8px" onClick={onOpen}>
+        <AlertIcon />
+        <Box wordBreak="break-all" whiteSpace="break-spaces">
+          {p.error.title}
+        </Box>
+        <Button ml="auto" variant="ghost" colorScheme="gray" size="sm" mt="1px">
+          View details
+        </Button>
+      </Alert>
+
+      <RPModal onClose={onClose} size="6xl" isOpen={isOpen}>
+        <ModalOverlay />
+        <ModalContent>
+          <ModalHeader>{p.error.title}</ModalHeader>
+          <ModalCloseButton />
+          <ModalBody>
+            <CodeBlock language="json" codeString={p.error.content} showScroll={false} />
+          </ModalBody>
+          <ModalFooter gap={2}>
+            {hasConnectorLogs && (
+              <Button onClick={() => appGlobal.history.push(`/topics/${LOGS_TOPIC_NAME}`)} mr="auto">
+                Show Logs
+              </Button>
+            )}
+            <Button onClick={onClose}>Close</Button>
+          </ModalFooter>
+        </ModalContent>
+      </RPModal>
+    </>
+  );
+});
 
 @observer
-class KafkaConnectorDetails extends PageComponent<{ clusterName: string, connector: string }> {
+class KafkaConnectorDetails extends PageComponent<{ clusterName: string; connector: string }> {
+  initPage(p: PageInitHelper): void {
+    const clusterName = decodeURIComponent(this.props.clusterName);
+    const connector = decodeURIComponent(this.props.connector);
+    p.title = connector;
+    p.addBreadcrumb('Connectors', '/connect-clusters');
+    p.addBreadcrumb(clusterName, `/connect-clusters/${encodeURIComponent(clusterName)}`, 'Cluster Name');
+    p.addBreadcrumb(
+      connector,
+      `/connect-clusters/${encodeURIComponent(clusterName)}/${encodeURIComponent(connector)}`,
+      undefined,
+      {
+        canBeTruncated: true,
+        canBeCopied: true,
+      },
+    );
+    this.refreshData(true);
+    appGlobal.onRefresh = () => this.refreshData(true);
+  }
 
-    @observable placeholder = 5;
-    @observable currentConfig: string = "";
+  async refreshData(force: boolean): Promise<void> {
+    ConnectClusterStore.connectClusters.clear();
+    await api.refreshConnectClusters(force);
 
-    autoRunDisposer: IReactionDisposer | undefined;
-    showConfigUpdated = false;
+    // refresh topics so we know whether or not we can show the "go to error logs topic" button in the connector details error popup
+    // and show the logs tab
+    api.refreshTopics(force);
+  }
 
-    @observable pausingConnector: ClusterConnectorInfo | null = null;
-    @observable restartingConnector: ClusterConnectorInfo | null = null;
-    @observable updatingConnector: UpdatingConnectorData | null = null;
-    @observable restartingTask: RestartingTaskData | null = null;
-    @observable deletingConnector: string | null = null;
+  render() {
+    const clusterName = decodeURIComponent(this.props.clusterName);
+    const connectorName = decodeURIComponent(this.props.connector);
 
+    if (api.connectConnectors?.isConfigured === false) return <NotConfigured />;
 
-    constructor(p: any) {
-        super(p);
-        makeObservable(this);
-
-        this.autoRunDisposer = autorun(() => {
-            // update config in editor
-            const clusterName = this.props.clusterName;
-            const connectorName = this.props.connector;
-
-            const cluster = api.connectConnectors?.clusters?.first(c => c.clusterName == clusterName);
-            const connector = cluster?.connectors.first(c => c.name == connectorName);
-
-            const currentConfig = untracked(() => this.currentConfig);
-            const isInitialUpdate = !currentConfig;
-            const newConfig = connector?.jsonConfig ?? '';
-            if (newConfig && newConfig != currentConfig) {
-                this.currentConfig = newConfig;
-                if (!isInitialUpdate) message.info('Shown config has been updated');
-            }
-        });
-    }
-
-    initPage(p: PageInitHelper): void {
-        const clusterName = this.props.clusterName;
-        const connector = this.props.connector;
-        p.title = connector;
-        p.addBreadcrumb("Kafka Connect", `/kafka-connect`);
-        p.addBreadcrumb(clusterName, `/kafka-connect/${clusterName}`);
-        p.addBreadcrumb(connector, `/kafka-connect/${clusterName}/${connector}`);
-
-
-
-        this.refreshData(false);
-        appGlobal.onRefresh = () => this.refreshData(true);
-    }
-
-    async refreshData(force: boolean): Promise<void> {
-        await api.refreshConnectClusters(force);
-    }
-
-    componentWillUnmount() {
-        if (this.autoRunDisposer) {
-            this.autoRunDisposer();
-            this.autoRunDisposer = undefined;
-        }
-    }
-
-    render() {
-        const clusterName = this.props.clusterName;
-        const connectorName = this.props.connector;
-
-        if (api.connectConnectors?.isConfigured === false) return <NotConfigured />;
-
-        const settings = uiSettings.kafkaConnect;
-        const cluster = api.connectConnectors?.clusters?.first(c => c.clusterName == clusterName);
-        if (!cluster) return "cluster not found";
-        const connector = cluster?.connectors.first(c => c.name == connectorName);
-        if (!connector) return "connector not found";
-
-        const state = connector.state.toLowerCase();
-        const isRunning = state == 'running';
-
-        const tasks = connector.tasks;
-
-        const canEdit = cluster.canEditCluster;
-
-
-        return (
-            <motion.div {...animProps} style={{ margin: '0 1rem' }}>
-                <ConnectorStatisticsCard clusterName={clusterName} connectorName={connectorName} />
-
-                {/* Main Card */}
-                <Card>
-                    {/* Title + Pause/Restart + Delete */}
-                    <div style={{ display: 'flex', alignItems: 'center', margin: '.5em 0', paddingLeft: '2px' }}>
-                        <span style={{ display: 'inline-flex', gap: '.5em', alignItems: 'center' }}>
-                            <span style={{ fontSize: '17px', display: 'inline-block' }}>{isRunning ? okIcon : warnIcon}</span>
-                            <span style={{ fontSize: 'medium', fontWeight: 600, lineHeight: '0px', marginBottom: '1px' }}>{connectorName}</span>
-                            <span style={{ fontSize: 'small', opacity: 0.5 }}>({state ?? '<empty>'})</span>
-                        </span>
-
-                        <span style={{ marginLeft: 'auto', display: 'inline-flex', gap: '.5em', fontSize: '12px' }}>
-                            <Tooltip
-                                placement="top" trigger={!canEdit ? "hover" : "none"} mouseLeaveDelay={0}
-                                getPopupContainer={findPopupContainer}
-                                overlay={"You don't have 'canEditConnectCluster' permissions for this connect cluster"}
-                            >
-                                <Button disabled={!canEdit} onClick={() => this.pausingConnector = connector}>
-                                    {isRunning ? 'Pause' : 'Resume'}
-                                </Button>
-
-                            </Tooltip>
-                            <Tooltip
-                                placement="top" trigger={!canEdit ? "hover" : "none"} mouseLeaveDelay={0}
-                                getPopupContainer={findPopupContainer}
-                                overlay={"You don't have 'canEditConnectCluster' permissions for this connect cluster"}
-                            >
-                                <Button disabled={!canEdit} onClick={() => this.restartingConnector = connector}>Restart</Button>
-                            </Tooltip>
-                            <Tooltip
-                                placement="top" trigger={!canEdit ? "hover" : "none"} mouseLeaveDelay={0}
-                                getPopupContainer={findPopupContainer}
-                                overlay={"You don't have 'canEditConnectCluster' permissions for this connect cluster"}
-                            >
-                                <Button danger disabled={!canEdit} onClick={() => this.deletingConnector = connectorName}
-                                    style={{ marginLeft: '1em', minWidth: '8em' }}
-                                >Delete</Button>
-                            </Tooltip>
-                        </span>
-                    </div>
-
-                    {/* Editor */}
-                    <div style={{ marginTop: '1em' }}>
-                        <div style={{ border: '1px solid hsl(0deg, 0%, 90%)', borderRadius: '2px' }}>
-                            <Editor
-                                beforeMount={onBeforeEditorMount}
-                                onMount={onMountEditor}
-
-
-                                // theme="vs-dark"
-                                // defaultLanguage="typescript"
-
-                                // theme='myCoolTheme'
-                                // language='mySpecialLanguage'
-
-                                language='json'
-                                value={this.currentConfig}
-                                onChange={(v, e) => {
-                                    if (v) {
-                                        if (!this.currentConfig && !v)
-                                            return; // dont replace undefiend with empty (which would trigger our 'autorun')
-                                        this.currentConfig = v;
-                                    }
-                                }}
-
-                                // language='yaml'
-                                // defaultValue={yamlText}
-
-                                // language='protobuf'
-                                // defaultValue={protoText}
-                                // theme='proto-custom'
-
-                                options={{
-                                    readOnly: !canEdit,
-
-                                    minimap: {
-                                        enabled: false,
-                                    },
-                                    roundedSelection: false,
-                                    padding: {
-                                        top: 4,
-                                    },
-                                    showFoldingControls: 'always',
-                                    glyphMargin: false,
-                                    scrollBeyondLastLine: false,
-                                    lineNumbersMinChars: 4,
-                                    scrollbar: {
-                                        alwaysConsumeMouseWheel: false,
-                                    },
-                                    fontSize: 12,
-                                    occurrencesHighlight: false,
-                                    foldingHighlight: false,
-                                    selectionHighlight: false,
-                                }}
-
-                                height="300px"
-                            />
-                        </div>
-
-                        <div style={{ display: 'flex', justifyContent: 'flex-end', margin: '1em 0', marginBottom: '1.5em' }}>
-                            <Tooltip
-                                placement="top" trigger={!canEdit ? "hover" : "none"} mouseLeaveDelay={0}
-                                getPopupContainer={findPopupContainer}
-                                overlay={"You don't have 'canEditConnectCluster' permissions for this connect cluster"}
-                            >
-                                <Button type='primary' ghost style={{ width: '200px' }} disabled={(() => {
-                                    if (!canEdit) return true;
-
-                                    if (!this.currentConfig) return true;
-                                    try { JSON.parse(this.currentConfig); }
-                                    catch (ex: any) { return true; }
-                                    return false;
-                                })()} onClick={async () => {
-
-                                    let newConfigObj: object;
-                                    try {
-                                        newConfigObj = JSON.parse(this.currentConfig);
-                                    } catch (ex: any) {
-                                        message.error("Config is not valid json!", 3);
-                                        return;
-                                    }
-
-                                    this.updatingConnector = { clusterName, connector, newConfigObj };
-                                }}>
-                                    Update Config
-                                </Button>
-                            </Tooltip>
-                        </div>
-                    </div>
-
-                    {/* Task List */}
-                    <div style={{ marginTop: '1em' }}>
-                        <KowlTable
-                            key="taskList"
-
-                            dataSource={tasks}
-                            columns={[
-                                {
-                                    title: 'Task', dataIndex: 'taskId', width: 200,
-                                    sorter: sortField('taskId'), defaultSortOrder: 'ascend',
-                                    render: (v) => <Code nowrap>Task-{v}</Code>
-                                },
-                                {
-                                    title: 'Status', dataIndex: 'state', sorter: sortField('state'),
-                                    render: (_, r) => <TaskState observable={r} />,
-                                    filterType: { type: 'enum', optionClassName: 'capitalize', toDisplay: x => String(x).toLowerCase() },
-                                },
-                                {
-                                    title: 'Worker', dataIndex: 'workerId', sorter: sortField('workerId'),
-                                    render: (_, r) => <Code nowrap>{r.workerId}</Code>,
-                                    filterType: { type: 'enum' },
-                                },
-                                {
-                                    title: 'Actions', width: 150,
-                                    render: (_, r) => <TaskActionsColumn
-                                        clusterName={clusterName} connectorName={connectorName} taskId={r.taskId}
-                                        getRestartingTask={() => this.restartingTask}
-                                        setRestartingTask={t => this.restartingTask = t}
-                                    />
-                                },
-                            ]}
-                            rowKey='taskId'
-
-                            search={{
-                                searchColumnIndex: 0,
-                                isRowMatch: (row, regex) => regex.test(String(row.taskId))
-                                    || regex.test(row.state)
-                                    || regex.test(row.workerId)
-                            }}
-
-                            observableSettings={uiSettings.kafkaConnect.connectorDetails}
-                            pagination={{
-                                defaultPageSize: 10,
-                            }}
-                        />
-                    </div>
-                </Card>
-
-                {/* Pause/Resume */}
-                <ConfirmModal<ClusterConnectorInfo>
-                    target={() => this.pausingConnector}
-                    clearTarget={() => this.pausingConnector = null}
-
-                    content={(c) => <>{isRunning ? 'Pause' : 'Resume'} connector <strong>{c.name}</strong>?</>}
-                    successMessage={(c) => <> {isRunning ? 'Resumed' : 'Paused'} connector <strong>{c.name}</strong></>}
-
-                    onOk={async (c) => {
-                        if (isRunning)
-                            await api.pauseConnector(clusterName, c.name);
-                        else
-                            await api.resumeConnector(clusterName, c.name);
-                        await this.refreshData(true);
-                    }}
-                />
-
-                {/* Restart */}
-                <ConfirmModal<ClusterConnectorInfo>
-                    target={() => this.restartingConnector}
-                    clearTarget={() => this.restartingConnector = null}
-
-                    content={(c) => <>Restart connector <strong>{c.name}</strong>?</>}
-                    successMessage={(c) => <>Successfully restarted connector <strong>{c.name}</strong></>}
-
-                    onOk={async (c) => {
-                        await api.restartConnector(clusterName, c.name);
-                        await this.refreshData(true);
-                    }}
-                />
-
-                {/* Update Config */}
-                <ConfirmModal<UpdatingConnectorData>
-                    target={() => this.updatingConnector}
-                    clearTarget={() => this.updatingConnector = null}
-
-                    content={(c) => <>Update configuration of connector <strong>{c.connector.name}</strong>?</>}
-                    successMessage={(c) => <>Successfully updated config of <strong>{c.connector.name}</strong></>}
-
-                    onOk={async (c) => {
-                        await api.updateConnector(c.clusterName, c.connector.name, c.newConfigObj);
-                        await this.refreshData(true);
-                    }}
-                />
-
-                {/* Restart Task */}
-                <ConfirmModal<RestartingTaskData>
-                    target={() => this.restartingTask}
-                    clearTarget={() => this.restartingTask = null}
-
-                    content={(c) => <>Restart task <strong>{c.taskId}</strong> of <strong>{c.connectorName}</strong>?</>}
-                    successMessage={(c) => <>Successfully restarted <strong>{c.taskId}</strong> of <strong>{c.connectorName}</strong></>}
-
-                    onOk={async (c) => {
-                        await api.restartTask(c.clusterName, c.connectorName, c.taskId);
-                        await this.refreshData(true);
-                    }}
-                />
-
-                {/* Delete Connector */}
-                <ConfirmModal<string>
-                    target={() => this.deletingConnector}
-                    clearTarget={() => this.deletingConnector = null}
-
-                    content={(c) => <>Delete connector <strong>{c}</strong>?</>}
-                    successMessage={(c) => <>Deleted connector <strong>{c}</strong></>}
-
-                    onOk={async (c) => {
-                        await api.deleteConnector(clusterName, c);
-                        appGlobal.history.push(`/kafka-connect/${clusterName}`);
-                        await this.refreshData(true);
-                    }}
-                />
-
-            </motion.div>
-        );
-    }
+    return (
+      <PageContent>
+        <KafkaConnectorMain clusterName={clusterName} connectorName={connectorName} refreshData={this.refreshData} />
+      </PageContent>
+    );
+  }
 }
 
 export default KafkaConnectorDetails;
 
-@observer
-class TaskActionsColumn extends Component<{
-    clusterName: string,
-    connectorName: string,
-    taskId: number,
+const ConnectorDetails = observer(
+  (p: {
+    clusterName: string;
+    connectClusterStore: ConnectClusterStore;
+    connector: ClusterConnectorInfo;
+  }) => {
+    const store = p.connectClusterStore.getConnectorStore(p.connector.name);
 
-    getRestartingTask: () => RestartingTaskData | null,
-    setRestartingTask: (x: RestartingTaskData) => void,
-}> {
-    render() {
-        const { clusterName, connectorName, taskId } = this.props;
-        const restartingTask = this.props.getRestartingTask();
+    const allProps = [...(store?.propsByName.values() ?? [])];
 
-        const isRestarting = restartingTask
-            && restartingTask.clusterName == clusterName
-            && restartingTask.connectorName == connectorName
-            && restartingTask.taskId == taskId;
+    const items = allProps
+      .filter((x) => {
+        if (x.isHidden) return false;
+        if (x.entry.definition.type === DataType.Password) return false;
+        if (x.entry.definition.importance !== PropertyImportance.High) return false;
 
-        return <span style={{ display: 'inline-flex', gap: '.75em', alignItems: 'center' }}>
-            <span className={'linkBtn' + (isRestarting ? ' disabled' : '')} onClick={() => {
-                if (isRestarting) return;
-                this.props.setRestartingTask({
-                    clusterName,
-                    connectorName,
-                    taskId: taskId,
-                });
-            }}>
-                Restart
-            </span>
-        </span>
+        if (!x.value) return false;
+        if (x.name === 'name') return false;
 
-    }
+        return true;
+      })
+      .orderBy((x) => {
+        let i = 0;
+        for (const s of store?.connectorStepDefinitions ?? [])
+          for (const g of s.groups)
+            for (const p of g.config_keys) {
+              if (p === x.name) return i;
+              i++;
+            }
+
+        return 0;
+      });
+
+    const displayEntries = items.map((e) => {
+      const r = {
+        name: e.entry.definition.display_name,
+        value: String(e.value),
+      };
+
+      // Try to undo mapping
+      if (e.entry.metadata.recommended_values?.length) {
+        const match = e.entry.metadata.recommended_values.find((x) => x.value === e.value);
+        if (match) {
+          r.value = String(match.display_name);
+        }
+      }
+
+      return r;
+    });
+
+    displayEntries.unshift({
+      name: 'Type',
+      value: `${p.connector.type === 'source' ? 'Import from' : 'Export to'} ${getConnectorFriendlyName(p.connector.class)}`,
+    });
+
+    return (
+      <Grid templateColumns="auto 1fr" rowGap="3" columnGap="10">
+        {displayEntries.map((x) => (
+          <React.Fragment key={x.name}>
+            <Text fontWeight="semibold" whiteSpace="nowrap">
+              {x.name}
+            </Text>
+            <Text whiteSpace="nowrap" textOverflow="ellipsis" overflow="hidden" title={x.value}>
+              {x.value}
+            </Text>
+          </React.Fragment>
+        ))}
+      </Grid>
+    );
+  },
+);
+
+const LogsTab = observer(
+  (p: {
+    clusterName: string;
+    connectClusterStore: ConnectClusterStore;
+    connector: ClusterConnectorInfo;
+  }) => {
+    const { connector } = p;
+    const connectorName = connector.name;
+    const topicName = LOGS_TOPIC_NAME;
+    const topic = api.topics?.first((x) => x.topicName === topicName);
+
+    const createLogsTabState = () => {
+      const search: MessageSearch = createMessageSearch();
+      const state = observable({
+        messages: search.messages,
+        isComplete: false,
+        error: null as string | null,
+        search,
+      });
+
+      // Start search immediately
+      const searchPromise = executeMessageSearch(search, topicName, connectorName);
+      searchPromise.catch((x) => (state.error = String(x))).finally(() => (state.isComplete = true));
+      return state;
+    };
+
+    const [state, setState] = useState(createLogsTabState);
+
+    const loadLargeMessage = async (topicName: string, partitionID: number, offset: number) => {
+      // Create a new search that looks for only this message specifically
+      const search = createMessageSearch();
+      const searchReq: MessageSearchRequest = {
+        filterInterpreterCode: '',
+        maxResults: 1,
+        partitionId: partitionID,
+        startOffset: offset,
+        startTimestamp: 0,
+        topicName: topicName,
+        includeRawPayload: true,
+        ignoreSizeLimit: true,
+        keyDeserializer: uiState.topicSettings.searchParams.keyDeserializer,
+        valueDeserializer: uiState.topicSettings.searchParams.valueDeserializer,
+      };
+      const messages = await search.startSearch(searchReq);
+
+      if (messages && messages.length === 1) {
+        // We must update the old message (that still says "payload too large")
+        // So we just find its index and replace it in the array we are currently displaying
+        const indexOfOldMessage = state.messages.findIndex((x) => x.partitionID === partitionID && x.offset === offset);
+        if (indexOfOldMessage > -1) {
+          state.messages[indexOfOldMessage] = messages[0];
+        } else {
+          console.error('LoadLargeMessage: cannot find old message to replace', {
+            searchReq,
+            messages,
+          });
+          throw new Error(
+            'LoadLargeMessage: Cannot find old message to replace (message results must have changed since the load was started)',
+          );
+        }
+      } else {
+        console.error('LoadLargeMessage: messages response is empty', { messages });
+        throw new Error("LoadLargeMessage: Couldn't load the message content, the response was empty");
+      }
+    };
+
+    const paginationParams = usePaginationParams(10, state.messages.length);
+    const messageTableColumns: ColumnDef<TopicMessage>[] = [
+      {
+        header: 'Timestamp',
+        accessorKey: 'timestamp',
+        cell: ({
+          row: {
+            original: { timestamp },
+          },
+        }) => <TimestampDisplay unixEpochMillisecond={timestamp} format="default" />,
+        size: 30,
+      },
+      {
+        header: 'Value',
+        accessorKey: 'value',
+        cell: ({ row: { original } }) => (
+          <MessagePreview
+            msg={original}
+            previewFields={() => []}
+            isCompactTopic={topic ? topic.cleanupPolicy.includes('compact') : false}
+          />
+        ),
+        size: Number.MAX_SAFE_INTEGER,
+      },
+    ];
+
+    const filteredMessages = state.messages.filter((x) => {
+      if (!uiSettings.connectorsDetails.logsQuickSearch) return true;
+      return isFilterMatch(uiSettings.connectorsDetails.logsQuickSearch, x);
+    });
+
+    return (
+      <>
+        <Box my="1rem">The logs below are for the last three hours.</Box>
+
+        <Section minWidth="800px">
+          <Flex mb="6">
+            <SearchField
+              width="230px"
+              searchText={uiSettings.connectorsDetails.logsQuickSearch}
+              setSearchText={(x) => (uiSettings.connectorsDetails.logsQuickSearch = x)}
+            />
+            <Button variant="outline" ml="auto" onClick={() => setState(createLogsTabState())}>
+              Refresh logs
+            </Button>
+          </Flex>
+
+          <DataTable<TopicMessage>
+            data={filteredMessages}
+            emptyText="No messages"
+            columns={messageTableColumns}
+            sorting={uiSettings.connectorsDetails.sorting ?? []}
+            onSortingChange={(sorting) => {
+              uiSettings.connectorsDetails.sorting =
+                typeof sorting === 'function' ? sorting(uiState.topicSettings.searchParams.sorting) : sorting;
+            }}
+            pagination={paginationParams}
+            subComponent={({ row: { original } }) => (
+              <ExpandedMessage
+                msg={original}
+                loadLargeMessage={() =>
+                  loadLargeMessage(state.search.searchRequest?.topicName ?? '', original.partitionID, original.offset)
+                }
+              />
+            )}
+          />
+        </Section>
+      </>
+    );
+  },
+);
+
+function isFilterMatch(str: string, m: TopicMessage) {
+  str = str.toLowerCase();
+  if (m.offset.toString().toLowerCase().includes(str)) return true;
+  if (m.keyJson?.toLowerCase().includes(str)) return true;
+  if (m.valueJson?.toLowerCase().includes(str)) return true;
+  return false;
 }
 
+async function executeMessageSearch(search: MessageSearch, topicName: string, connectorKey: string) {
+  const filterCode: string = `return key == "${connectorKey}";`;
+
+  const lastXHours = 5;
+  const startTime = new Date();
+  startTime.setHours(startTime.getHours() - lastXHours);
+
+  const request = {
+    topicName: topicName,
+    partitionId: -1,
+
+    startOffset: PartitionOffsetOrigin.Timestamp,
+    startTimestamp: startTime.getTime(),
+    maxResults: 1000,
+    filterInterpreterCode: encodeBase64(sanitizeString(filterCode)),
+    includeRawPayload: false,
+
+    keyDeserializer: PayloadEncoding.UNSPECIFIED,
+    valueDeserializer: PayloadEncoding.UNSPECIFIED,
+  } as MessageSearchRequest;
+
+  // All of this should be part of "backendApi.ts", starting a message search should return an observable object,
+  // so any changes in phase, messages, error, etc can be used immediately in the ui
+  return transaction(async () => {
+    try {
+      search.startSearch(request).catch((err) => {
+        const msg = (err as Error).message ?? String(err);
+        console.error(`error in connectorLogsMessageSearch: ${msg}`);
+        return [];
+      });
+    } catch (error: any) {
+      console.error(`error in connectorLogsMessageSearch: ${(error as Error).message ?? String(error)}`);
+      return [];
+    }
+  });
+}

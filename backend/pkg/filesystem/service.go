@@ -11,8 +11,6 @@ package filesystem
 
 import (
 	"fmt"
-	"go.uber.org/zap"
-	"io/ioutil"
 	"os"
 	"os/signal"
 	"path"
@@ -21,11 +19,15 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"go.uber.org/zap"
+
+	"github.com/redpanda-data/console/backend/pkg/config"
 )
 
 // Service provides functionality to serve files from a git repository. The contents are stored in memory.
 type Service struct {
-	Cfg    Config
+	Cfg    config.Filesystem
 	logger *zap.Logger
 
 	// In memory cache for markdowns. Map key is the filename with stripped ".md" suffix.
@@ -36,7 +38,7 @@ type Service struct {
 }
 
 // NewService creates a new Git service with preconfigured Auth
-func NewService(cfg Config, logger *zap.Logger, onFilesUpdatedHook func()) (*Service, error) {
+func NewService(cfg config.Filesystem, logger *zap.Logger, onFilesUpdatedHook func()) (*Service, error) {
 	childLogger := logger.With(zap.String("source", "file_provider"))
 
 	return &Service{
@@ -116,6 +118,16 @@ func (c *Service) readFiles() (map[string]File, error) {
 				return err
 			}
 
+			if c.shouldSkip(currentPath) {
+				if info.IsDir() {
+					// skip the entire directory
+					return filepath.SkipDir
+				}
+
+				// skip the file
+				return nil
+			}
+
 			if info.IsDir() {
 				return nil
 			}
@@ -135,7 +147,9 @@ func (c *Service) readFiles() (map[string]File, error) {
 			}
 			loadedFiles++
 
-			payload, err := ioutil.ReadFile(currentPath)
+			//nolint:gosec // We trust the user here and load the currentPath variable
+			// which can only be provided via the configuration anyways.
+			payload, err := os.ReadFile(currentPath)
 			if err != nil {
 				return fmt.Errorf("failed to load file '%v' from filesystem: %w", currentPath, err)
 			}
@@ -152,7 +166,6 @@ func (c *Service) readFiles() (map[string]File, error) {
 
 			return nil
 		})
-
 		if err != nil {
 			return nil, fmt.Errorf("failed to load files from file system: %w", err)
 		}

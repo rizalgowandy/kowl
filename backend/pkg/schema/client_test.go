@@ -10,16 +10,23 @@
 package schema
 
 import (
+	"context"
 	"net/http"
 	"testing"
 
 	"github.com/jarcoal/httpmock"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/redpanda-data/console/backend/pkg/config"
+)
+
+const (
+	testSchemaRegistryBaseURL = "https://schema-registry.company.com"
 )
 
 func TestClient_GetSchemaByID(t *testing.T) {
-	baseURL := "https://schema-registry.company.com"
-	c, _ := newClient(Config{
+	baseURL := testSchemaRegistryBaseURL
+	c, _ := newClient(config.Schema{
 		Enabled: true,
 		URLs:    []string{baseURL},
 	})
@@ -30,21 +37,21 @@ func TestClient_GetSchemaByID(t *testing.T) {
 
 	schemaStr := "{\"type\": \"string\"}"
 	httpmock.RegisterResponder("GET", baseURL+"/schemas/ids/1000",
-		func(req *http.Request) (*http.Response, error) {
+		func(*http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(http.StatusOK, map[string]string{
 				"schema": schemaStr,
 			})
 		})
 
 	expected := &SchemaResponse{Schema: schemaStr}
-	actual, err := c.GetSchemaByID(1000)
+	actual, err := c.GetSchemaByID(context.Background(), 1000)
 	assert.NoError(t, err, "expected no error when fetching schema by id")
 	assert.Equal(t, expected, actual)
 }
 
 func TestClient_GetSubjects(t *testing.T) {
-	baseURL := "https://schema-registry.company.com"
-	c, _ := newClient(Config{
+	baseURL := testSchemaRegistryBaseURL
+	c, _ := newClient(config.Schema{
 		Enabled: true,
 		URLs:    []string{baseURL},
 	})
@@ -55,19 +62,19 @@ func TestClient_GetSubjects(t *testing.T) {
 
 	subjects := []string{"subject1", "subject2"}
 	httpmock.RegisterResponder("GET", baseURL+"/subjects",
-		func(req *http.Request) (*http.Response, error) {
+		func(*http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(http.StatusOK, subjects)
 		})
 
 	expected := &SubjectsResponse{Subjects: subjects}
-	actual, err := c.GetSubjects()
+	actual, err := c.GetSubjects(context.Background(), false)
 	assert.NoError(t, err, "expected no error when fetching subjects")
 	assert.Equal(t, expected, actual)
 }
 
 func TestClient_GetSubjectVersions(t *testing.T) {
-	baseURL := "https://schema-registry.company.com"
-	c, _ := newClient(Config{
+	baseURL := testSchemaRegistryBaseURL
+	c, _ := newClient(config.Schema{
 		Enabled: true,
 		URLs:    []string{baseURL},
 	})
@@ -77,12 +84,12 @@ func TestClient_GetSubjectVersions(t *testing.T) {
 
 	versions := []int{1, 2, 3}
 	httpmock.RegisterResponder("GET", baseURL+"/subjects/orders/versions",
-		func(req *http.Request) (*http.Response, error) {
+		func(_ *http.Request) (*http.Response, error) {
 			return httpmock.NewJsonResponse(http.StatusOK, versions)
 		})
 
 	expected := &SubjectVersionsResponse{Versions: versions}
-	actual, err := c.GetSubjectVersions("orders")
+	actual, err := c.GetSubjectVersions(context.Background(), "orders", false)
 	assert.NoError(t, err, "expected no error when fetching subject versions")
 	assert.Equal(t, expected, actual)
 }

@@ -14,40 +14,42 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
-	"github.com/twmb/franz-go/pkg/kversion"
-
-	"github.com/cloudhut/kowl/backend/pkg/msgpack"
-	"github.com/cloudhut/kowl/backend/pkg/proto"
-	"github.com/cloudhut/kowl/backend/pkg/schema"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
-
+	"github.com/twmb/franz-go/pkg/kversion"
 	"go.uber.org/zap"
+
+	"github.com/redpanda-data/console/backend/pkg/backoff"
+	"github.com/redpanda-data/console/backend/pkg/config"
+	"github.com/redpanda-data/console/backend/pkg/msgpack"
+	"github.com/redpanda-data/console/backend/pkg/proto"
+	"github.com/redpanda-data/console/backend/pkg/schema"
+	"github.com/redpanda-data/console/backend/pkg/serde"
 )
 
 // Service acts as interface to interact with the Kafka Cluster
 type Service struct {
-	Config Config
+	Config *config.Config
 	Logger *zap.Logger
 
 	KafkaClientHooks kgo.Hook
 	KafkaClient      *kgo.Client
+	KafkaAdmClient   *kadm.Client
 	SchemaService    *schema.Service
 	ProtoService     *proto.Service
-	Deserializer     deserializer
+	SerdeService     *serde.Service
 	MetricsNamespace string
 }
 
 // NewService creates a new Kafka service and immediately checks connectivity to all components. If any of these external
 // dependencies fail an error wil be returned.
-func NewService(cfg Config, logger *zap.Logger, metricsNamespace string) (*Service, error) {
-	// Kafka client
-	hooksChildLogger := logger.With(zap.String("source", "kafka_client_hooks"))
-	clientHooks := newClientHooks(hooksChildLogger, "kowl")
+func NewService(cfg *config.Config, logger *zap.Logger, metricsNamespace string) (*Service, error) {
+	kgoHooks := newClientHooks(logger.Named("kafka_client_hooks"), metricsNamespace)
 
-	logger.Debug("creating new kafka client", zap.Any("config", cfg.RedactedConfig()))
-	kgoOpts, err := NewKgoConfig(&cfg, logger, clientHooks)
+	logger.Debug("creating new kafka client", zap.Any("config", cfg.Kafka.RedactedConfig()))
+	kgoOpts, err := NewKgoConfig(&cfg.Kafka, logger, kgoHooks)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create a valid kafka client config: %w", err)
 	}
@@ -58,20 +60,27 @@ func NewService(cfg Config, logger *zap.Logger, metricsNamespace string) (*Servi
 	}
 
 	// Ensure Kafka connection works, otherwise fail fast. Allow up to 5 retries with exponentially increasing backoff.
-	// Retries with backoff is very helpful in environments where Kowl concurrently starts with the Kafka target, such
-	// as a docker-compose demo.
-	retries := 5
-	backoffDuration := 1 * time.Second
-	for retries > 0 {
+	// Retries with backoff is very helpful in environments where Console concurrently starts with the Kafka target,
+	// such as a docker-compose demo.
+	eb := backoff.ExponentialBackoff{
+		BaseInterval: cfg.Kafka.Startup.RetryInterval,
+		MaxInterval:  cfg.Kafka.Startup.MaxRetryInterval,
+		Multiplier:   cfg.Kafka.Startup.BackoffMultiplier,
+	}
+	attempt := 0
+	for attempt < cfg.Kafka.Startup.MaxRetries && cfg.Kafka.Startup.EstablishConnectionEagerly {
 		err = testConnection(logger, kafkaClient, time.Second*15)
 		if err == nil {
 			break
 		}
-		logger.Warn(fmt.Sprintf("Failed to test Kafka connection, going to retry in %vs",
-			backoffDuration.Seconds()), zap.Int("remaining_retries", retries))
+
+		backoffDuration := eb.Backoff(attempt)
+		logger.Warn(
+			fmt.Sprintf("Failed to test Kafka connection, going to retry in %vs", backoffDuration.Seconds()),
+			zap.Int("remaining_retries", cfg.Kafka.Startup.MaxRetries-attempt),
+		)
+		attempt++
 		time.Sleep(backoffDuration)
-		backoffDuration *= 2
-		retries--
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to test kafka connection: %w", err)
@@ -79,14 +88,14 @@ func NewService(cfg Config, logger *zap.Logger, metricsNamespace string) (*Servi
 
 	// Schema Registry
 	var schemaSvc *schema.Service
-	if cfg.Schema.Enabled {
+	if cfg.Kafka.Schema.Enabled {
 		logger.Info("creating schema registry client and testing connectivity")
-		schemaSvc, err = schema.NewService(cfg.Schema, logger)
+		schemaSvc, err = schema.NewService(cfg.Kafka.Schema, logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create schema service: %w", err)
 		}
 
-		err := schemaSvc.CheckConnectivity()
+		err := schemaSvc.CheckConnectivity(context.Background())
 		if err != nil {
 			return nil, fmt.Errorf("failed to verify connectivity to schema registry: %w", err)
 		}
@@ -95,8 +104,8 @@ func NewService(cfg Config, logger *zap.Logger, metricsNamespace string) (*Servi
 
 	// Proto Service
 	var protoSvc *proto.Service
-	if cfg.Protobuf.Enabled {
-		svc, err := proto.NewService(cfg.Protobuf, logger, schemaSvc)
+	if cfg.Kafka.Protobuf.Enabled {
+		svc, err := proto.NewService(cfg.Kafka.Protobuf, logger, schemaSvc)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create protobuf service: %w", err)
 		}
@@ -105,25 +114,24 @@ func NewService(cfg Config, logger *zap.Logger, metricsNamespace string) (*Servi
 
 	// Msgpack service
 	var msgPackSvc *msgpack.Service
-	if cfg.MessagePack.Enabled {
-		msgPackSvc, err = msgpack.NewService(cfg.MessagePack)
+	if cfg.Kafka.MessagePack.Enabled {
+		msgPackSvc, err = msgpack.NewService(cfg.Kafka.MessagePack)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create msgpack service: %w", err)
 		}
 	}
 
+	serdeSvc := serde.NewService(schemaSvc, protoSvc, msgPackSvc, cfg.Kafka.Cbor)
+
 	return &Service{
 		Config:           cfg,
 		Logger:           logger,
-		KafkaClientHooks: clientHooks,
+		KafkaClientHooks: kgoHooks,
 		KafkaClient:      kafkaClient,
+		KafkaAdmClient:   kadm.NewClient(kafkaClient),
 		SchemaService:    schemaSvc,
 		ProtoService:     protoSvc,
-		Deserializer: deserializer{
-			SchemaService:  schemaSvc,
-			ProtoService:   protoSvc,
-			MsgPackService: msgPackSvc,
-		},
+		SerdeService:     serdeSvc,
 		MetricsNamespace: metricsNamespace,
 	}, nil
 }
@@ -137,8 +145,9 @@ func (s *Service) Start() error {
 	return s.ProtoService.Start()
 }
 
+// NewKgoClient creates a new Kafka client based on the stored Kafka configuration.
 func (s *Service) NewKgoClient(additionalOpts ...kgo.Opt) (*kgo.Client, error) {
-	kgoOpts, err := NewKgoConfig(&s.Config, s.Logger, s.KafkaClientHooks)
+	kgoOpts, err := NewKgoConfig(&s.Config.Kafka, s.Logger, s.KafkaClientHooks)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create a valid kafka client config: %w", err)
 	}
@@ -160,9 +169,7 @@ func testConnection(logger *zap.Logger, client *kgo.Client, timeout time.Duratio
 
 	logger.Info("connecting to Kafka seed brokers, trying to fetch cluster metadata")
 
-	req := kmsg.MetadataRequest{
-		Topics: nil,
-	}
+	req := kmsg.NewMetadataRequest()
 	res, err := req.RequestWith(ctx, client)
 	if err != nil {
 		return fmt.Errorf("failed to request metadata: %w", err)

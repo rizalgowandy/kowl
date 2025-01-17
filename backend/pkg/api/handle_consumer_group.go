@@ -13,13 +13,12 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/go-chi/chi"
+	"github.com/cloudhut/common/rest"
 	"github.com/twmb/franz-go/pkg/kmsg"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
-	"github.com/cloudhut/common/rest"
-	"github.com/cloudhut/kowl/backend/pkg/console"
+	"github.com/redpanda-data/console/backend/pkg/console"
 )
 
 // GetConsumerGroupsResponse represents the data which is returned for listing topics
@@ -37,7 +36,7 @@ func (api *API) handleGetConsumerGroups() http.HandlerFunc {
 
 		visibleGroups := make([]console.ConsumerGroupOverview, 0, len(describedGroups))
 		for _, group := range describedGroups {
-			canSee, restErr := api.Hooks.Console.CanSeeConsumerGroup(r.Context(), group.GroupID)
+			canSee, restErr := api.Hooks.Authorization.CanSeeConsumerGroup(r.Context(), group.GroupID)
 			if restErr != nil {
 				rest.SendRESTError(w, r, api.Logger, restErr)
 				return
@@ -47,7 +46,7 @@ func (api *API) handleGetConsumerGroups() http.HandlerFunc {
 			}
 
 			// Attach allowed actions for each topic
-			group.AllowedActions, restErr = api.Hooks.Console.AllowedConsumerGroupActions(r.Context(), group.GroupID)
+			group.AllowedActions, restErr = api.Hooks.Authorization.AllowedConsumerGroupActions(r.Context(), group.GroupID)
 			if restErr != nil {
 				rest.SendRESTError(w, r, api.Logger, restErr)
 				return
@@ -67,9 +66,9 @@ func (api *API) handleGetConsumerGroup() http.HandlerFunc {
 		ConsumerGroup console.ConsumerGroupOverview `json:"consumerGroup"`
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		groupID := chi.URLParam(r, "groupId")
+		groupID := rest.GetURLParam(r, "groupId")
 
-		canSee, restErr := api.Hooks.Console.CanSeeConsumerGroup(r.Context(), groupID)
+		canSee, restErr := api.Hooks.Authorization.CanSeeConsumerGroup(r.Context(), groupID)
 		if restErr != nil {
 			rest.SendRESTError(w, r, api.Logger, restErr)
 			return
@@ -146,8 +145,9 @@ func (api *API) handlePatchConsumerGroup() http.HandlerFunc {
 			return
 		}
 
-		// 2. Check if logged in user is allowed to edit Consumer Group (always true for Kowl, but not for Kowl Business)
-		canEdit, restErr := api.Hooks.Console.CanEditConsumerGroup(r.Context(), req.GroupID)
+		// 2. Check if logged-in user is allowed to edit
+		// Consumer Group (always true for Console OSS, but not for Console Business)
+		canEdit, restErr := api.Hooks.Authorization.CanEditConsumerGroup(r.Context(), req.GroupID)
 		if restErr != nil {
 			rest.SendRESTError(w, r, api.Logger, restErr)
 			return
@@ -229,8 +229,9 @@ func (api *API) handleDeleteConsumerGroupOffsets() http.HandlerFunc {
 			return
 		}
 
-		// 2. Check if logged in user is allowed to delete Consumer Group (always true for Kowl, but not for Kowl Business)
-		canDelete, restErr := api.Hooks.Console.CanDeleteConsumerGroup(r.Context(), req.GroupID)
+		// 2. Check if logged in user is allowed to delete Consumer Group (always true for Console OSS, but not for
+		// Console Business)
+		canDelete, restErr := api.Hooks.Authorization.CanDeleteConsumerGroup(r.Context(), req.GroupID)
 		if restErr != nil {
 			rest.SendRESTError(w, r, api.Logger, restErr)
 			return
@@ -276,5 +277,44 @@ func (api *API) handleDeleteConsumerGroupOffsets() http.HandlerFunc {
 
 		res := response{Topics: deletedTopics}
 		rest.SendResponse(w, r, api.Logger, http.StatusOK, res)
+	}
+}
+
+func (api *API) handleDeleteConsumerGroup() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		groupID := rest.GetURLParam(r, "groupId")
+
+		// 1. Check if logged in user is allowed to delete Consumer Group (always true for Console OSS, but not for
+		// Console Business)
+		canDelete, restErr := api.Hooks.Authorization.CanDeleteConsumerGroup(r.Context(), groupID)
+		if restErr != nil {
+			rest.SendRESTError(w, r, api.Logger, restErr)
+			return
+		}
+		if !canDelete {
+			rest.SendRESTError(w, r, api.Logger, &rest.Error{
+				Err:          fmt.Errorf("requester has no permissions to delete consumer group"),
+				Status:       http.StatusForbidden,
+				Message:      "You don't have permissions to delete this consumer group",
+				InternalLogs: []zapcore.Field{zap.String("group_id", groupID)},
+				IsSilent:     false,
+			})
+			return
+		}
+
+		// 3. Submit delete offset request
+		err := api.ConsoleSvc.DeleteConsumerGroup(r.Context(), groupID)
+		if err != nil {
+			rest.SendRESTError(w, r, api.Logger, &rest.Error{
+				Err:          fmt.Errorf("failed to delete consumer group: %w", err),
+				Status:       http.StatusServiceUnavailable,
+				Message:      fmt.Sprintf("Failed to delete consumer group: %v", err.Error()),
+				InternalLogs: []zapcore.Field{zap.String("group_id", groupID)},
+				IsSilent:     false,
+			})
+			return
+		}
+
+		rest.SendResponse(w, r, api.Logger, http.StatusOK, nil)
 	}
 }

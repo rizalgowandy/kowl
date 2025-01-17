@@ -1,14 +1,14 @@
-# Contributing to Kowl
+# Contributing to Redpanda Console
 
 Welcome! This guide is intended to help developers that are new to the community
-navigate the process of making contributions to the Kowl project. Please be 
+navigate the process of making contributions to Redpanda Console. Please be
 sure to also checkout our [code of conduct](https://github.com/redpanda-data/redpanda/blob/dev/CODE_OF_CONDUCT.md).
 We work hard to make this a welcoming community for all, and we're excited that 
 you are here!
 
 The basics:
 
-* Use the [Issue Tracker](https://github.com/redpanda-data/kowl/issues) to
+* Use the [Issue Tracker](https://github.com/redpanda-data/console/issues) to
   report bugs, crashes, performance issues, etc... Please include as much detail
   as possible.
 
@@ -28,11 +28,11 @@ The basics:
 
 Prerequisites that should be installed before proceeding:
 
-- Latest Node.js v17 & npm v8
-- Latest Go version (currently v1.18)
+- Latest Node.js v18 & npm v8
+- Latest Go version
 - Docker (required to start a local redpanda cluster)
 
-Kowl consists of two components:
+Redpanda Console consists of two components:
 
 1. React single page application for the frontend
 2. Go backend, which hosts the HTTP / RESTish API
@@ -80,7 +80,7 @@ project, and we've designed our review process and standards to reflect that.
 However, we're always trying to improve, and welcome any suggestions and
 feedback.
 
-### Formatting
+### Formatting & linting
 
 All mainstream editors and IDEs should  provide support (either natively 
 or through a plugin) for integrating with code formatting tools that can
@@ -92,6 +92,32 @@ each commit. This is important because occasionally a small change may cause a l
 reformatting, which makes reviewing changes difficult. In this case it would be
 appropriate to split the code change and formatting into separate commits. This is
 usually unnecessary.
+
+Before submitting your commits, please validate them against the existing linter
+rules. This repository uses a task runner in order to install the required
+dependencies (build tools, linters, formatters) as well as linting and formatting
+code. In order to use them:
+
+1. Install [task](https://taskfile.dev/installation/) on your machine
+2. In the repository root run: `task backend:fmt`
+3. If you run `task backend:lint` in the repository root the output will highlight
+   linting issues.
+
+### Tests
+
+Whether you are fixing an issue or adding a new feature, it is recommended that new
+tests are added to cover the new functionality. Tests can be run from command line.
+
+**Frontend:**
+- Open a terminal tab and go to the /frontend directory
+- Run `npm test` to run all tests
+
+**Backend:**
+- Some integration tests require a running Docker instance
+- In the repository root run `task backend:test-unit` to run the unit tests
+- Run `task backend:test-integration` to run the unit and integration tests
+- Run `task backend:cover` to run the unit and integration tests with code coverage report
+- Run `task backend:verify` to run the linter and all tests
 
 ### Commit history
 

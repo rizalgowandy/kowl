@@ -10,8 +10,9 @@
 package api
 
 import (
-	"github.com/cloudhut/common/rest"
 	"net/http"
+
+	"github.com/cloudhut/common/rest"
 )
 
 func (api *API) handleLivenessProbe() http.HandlerFunc {
@@ -37,7 +38,7 @@ func (api *API) handleStartupProbe() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Check Kafka connectivity
 		isKafkaOK := false
-		err := api.KafkaSvc.IsHealthy(r.Context())
+		err := api.ConsoleSvc.IsHealthy(r.Context())
 		if err == nil {
 			isKafkaOK = true
 		}

@@ -10,21 +10,17 @@
 package api
 
 import (
-	_ "context"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
-	_ "time"
-
-	"github.com/twmb/franz-go/pkg/kmsg"
-	"go.uber.org/zap/zapcore"
-
-	"go.uber.org/zap"
 
 	"github.com/cloudhut/common/rest"
-	"github.com/cloudhut/kowl/backend/pkg/console"
-	"github.com/go-chi/chi"
+	"github.com/twmb/franz-go/pkg/kmsg"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+
+	"github.com/redpanda-data/console/backend/pkg/console"
 )
 
 func (api *API) handleGetTopics() http.HandlerFunc {
@@ -48,7 +44,7 @@ func (api *API) handleGetTopics() http.HandlerFunc {
 		visibleTopics := make([]*console.TopicSummary, 0, len(topics))
 		for _, topic := range topics {
 			// Check if logged in user is allowed to see this topic. If not remove the topic from the list.
-			canSee, restErr := api.Hooks.Console.CanSeeTopic(r.Context(), topic.TopicName)
+			canSee, restErr := api.Hooks.Authorization.CanSeeTopic(r.Context(), topic.TopicName)
 			if restErr != nil {
 				rest.SendRESTError(w, r, api.Logger, restErr)
 				return
@@ -59,7 +55,7 @@ func (api *API) handleGetTopics() http.HandlerFunc {
 			}
 
 			// Attach allowed actions for each topic
-			topic.AllowedActions, restErr = api.Hooks.Console.AllowedTopicActions(r.Context(), topic.TopicName)
+			topic.AllowedActions, restErr = api.Hooks.Authorization.AllowedTopicActions(r.Context(), topic.TopicName)
 			if restErr != nil {
 				rest.SendRESTError(w, r, api.Logger, restErr)
 				return
@@ -81,11 +77,11 @@ func (api *API) handleGetPartitions() http.HandlerFunc {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		topicName := chi.URLParam(r, "topicName")
+		topicName := rest.GetURLParam(r, "topicName")
 		logger := api.Logger.With(zap.String("topic_name", topicName))
 
 		// Check if logged in user is allowed to view partitions for the given topic
-		canView, restErr := api.Hooks.Console.CanViewTopicPartitions(r.Context(), topicName)
+		canView, restErr := api.Hooks.Authorization.CanViewTopicPartitions(r.Context(), topicName)
 		if restErr != nil {
 			rest.SendRESTError(w, r, logger, restErr)
 			return
@@ -111,7 +107,7 @@ func (api *API) handleGetPartitions() http.HandlerFunc {
 			restErr := &rest.Error{
 				Err:      fmt.Errorf("expected exactly one topic detail in response, but got '%d'", len(topicDetails)),
 				Status:   http.StatusInternalServerError,
-				Message:  "Internal server error in Kowl, please file a issue in GitHub if you face this issue. The backend logs will contain more information.",
+				Message:  "Internal server error in RP Console, please file a issue in GitHub if you face this issue. The backend logs will contain more information.",
 				IsSilent: false,
 			}
 			rest.SendRESTError(w, r, logger, restErr)
@@ -133,11 +129,11 @@ func (api *API) handleGetTopicConfig() http.HandlerFunc {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		topicName := chi.URLParam(r, "topicName")
+		topicName := rest.GetURLParam(r, "topicName")
 		logger := api.Logger.With(zap.String("topic_name", topicName))
 
 		// Check if logged in user is allowed to view partitions for the given topic
-		canView, restErr := api.Hooks.Console.CanViewTopicConfig(r.Context(), topicName)
+		canView, restErr := api.Hooks.Authorization.CanViewTopicConfig(r.Context(), topicName)
 		if restErr != nil {
 			rest.SendRESTError(w, r, logger, restErr)
 			return
@@ -172,10 +168,10 @@ func (api *API) handleDeleteTopic() http.HandlerFunc {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		topicName := chi.URLParam(r, "topicName")
+		topicName := rest.GetURLParam(r, "topicName")
 
 		// Check if logged in user is allowed to view partitions for the given topic
-		canDelete, restErr := api.Hooks.Console.CanDeleteTopic(r.Context(), topicName)
+		canDelete, restErr := api.Hooks.Authorization.CanDeleteTopic(r.Context(), topicName)
 		if restErr != nil {
 			rest.SendRESTError(w, r, api.Logger, restErr)
 			return
@@ -233,7 +229,7 @@ func (d *deleteTopicRecordsRequest) OK() error {
 
 func (api *API) handleDeleteTopicRecords() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		topicName := chi.URLParam(r, "topicName")
+		topicName := rest.GetURLParam(r, "topicName")
 
 		// 1. Parse and validate request
 		var req deleteTopicRecordsRequest
@@ -244,7 +240,7 @@ func (api *API) handleDeleteTopicRecords() http.HandlerFunc {
 		}
 
 		// 2. Check if logged in user is allowed to view partitions for the given topic
-		canDelete, restErr := api.Hooks.Console.CanDeleteTopicRecords(r.Context(), topicName)
+		canDelete, restErr := api.Hooks.Authorization.CanDeleteTopicRecords(r.Context(), topicName)
 		if restErr != nil {
 			rest.SendRESTError(w, r, api.Logger, restErr)
 			return
@@ -281,6 +277,109 @@ func (api *API) handleDeleteTopicRecords() http.HandlerFunc {
 	}
 }
 
+type editTopicConfigRequest struct {
+	// Configs is the config entries that shall be modified on the given topic.
+	Configs []struct {
+		// Key is a key to modify (e.g. segment.bytes).
+		Key string `json:"key"`
+
+		// Op is the type of operation to perform for this config name.
+		// Valid values are: "set", "delete", "append", "subtract".
+		// If this field is omitted, it will default to SET.
+		//
+		// SET (0) is to set a configuration value; the value must not be null.
+		//
+		// DELETE (1) is to delete a configuration key.
+		//
+		// APPEND (2) is to add a value to the list of values for a key (if the
+		// key is for a list of values).
+		//
+		// SUBTRACT (3) is to remove a value from a list of values (if the key
+		// is for a list of values).
+		Op kmsg.IncrementalAlterConfigOp `json:"op"`
+
+		// Value is a value to set for the key (e.g. 10).
+		Value *string `json:"value"`
+	} `json:"configs"`
+}
+
+func (e *editTopicConfigRequest) OK() error {
+	if len(e.Configs) == 0 {
+		return fmt.Errorf("you must set at least one config entry that shall be modified")
+	}
+	for _, cfg := range e.Configs {
+		if cfg.Key == "" {
+			return fmt.Errorf("at least one config key was not set. config keys must always be set")
+		}
+	}
+
+	return nil
+}
+
+func (api *API) handleEditTopicConfig() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// 1. Parse and validate request
+		topicName := rest.GetURLParam(r, "topicName")
+		if topicName == "" {
+			rest.SendRESTError(w, r, api.Logger, &rest.Error{
+				Err:      fmt.Errorf("topic name must be set"),
+				Status:   http.StatusBadRequest,
+				Message:  "Topic name must be set",
+				IsSilent: false,
+			})
+			return
+		}
+
+		var req editTopicConfigRequest
+		restErr := rest.Decode(w, r, &req)
+		if restErr != nil {
+			rest.SendRESTError(w, r, api.Logger, restErr)
+			return
+		}
+
+		// 2. Check if logged-in user is allowed to edit topic configs.
+		canEdit, restErr := api.Hooks.Authorization.CanEditTopicConfig(r.Context(), topicName)
+		if restErr != nil {
+			rest.SendRESTError(w, r, api.Logger, restErr)
+			return
+		}
+		if !canEdit {
+			restErr := &rest.Error{
+				Err:      fmt.Errorf("requester has no permissions to edit this topic's config"),
+				Status:   http.StatusForbidden,
+				Message:  "You don't have permissions to edit this topic's configuration",
+				IsSilent: false,
+			}
+			rest.SendRESTError(w, r, api.Logger, restErr)
+			return
+		}
+
+		// 3. Submit edit topic config request
+		configRequests := make([]kmsg.IncrementalAlterConfigsRequestResourceConfig, 0, len(req.Configs))
+		for _, cfg := range req.Configs {
+			resourceCfg := kmsg.NewIncrementalAlterConfigsRequestResourceConfig()
+			resourceCfg.Name = cfg.Key
+			resourceCfg.Op = cfg.Op
+			resourceCfg.Value = cfg.Value
+			configRequests = append(configRequests, resourceCfg)
+		}
+
+		err := api.ConsoleSvc.EditTopicConfig(r.Context(), topicName, configRequests)
+		if err != nil {
+			rest.SendRESTError(w, r, api.Logger, &rest.Error{
+				Err:          fmt.Errorf("failed to edit topic config: %w", err),
+				Status:       http.StatusServiceUnavailable,
+				Message:      fmt.Sprintf("Failed to edit topic config: %v", err.Error()),
+				InternalLogs: []zapcore.Field{zap.String("topic_name", topicName)},
+				IsSilent:     false,
+			})
+			return
+		}
+
+		rest.SendResponse(w, r, api.Logger, http.StatusOK, nil)
+	}
+}
+
 // handleGetTopicsConfigs returns all set configuration options for one or more topics
 func (api *API) handleGetTopicsConfigs() http.HandlerFunc {
 	type response struct {
@@ -290,13 +389,13 @@ func (api *API) handleGetTopicsConfigs() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 1. Parse optional filters. If no filter is set they will be treated as wildcards
 		var topicNames []string
-		requestedTopicNames := r.URL.Query().Get("topicNames")
+		requestedTopicNames := rest.GetQueryParam(r, "topicNames")
 		if requestedTopicNames != "" {
 			topicNames = strings.Split(requestedTopicNames, ",")
 		}
 
 		var configKeys []string
-		requestedConfigKeys := r.URL.Query().Get("configKeys")
+		requestedConfigKeys := rest.GetQueryParam(r, "configKeys")
 		if requestedConfigKeys != "" {
 			configKeys = strings.Split(requestedConfigKeys, ",")
 		}
@@ -321,7 +420,7 @@ func (api *API) handleGetTopicsConfigs() http.HandlerFunc {
 
 		// 3. Check if user is allowed to view the config for these topics
 		for _, topicName := range topicNames {
-			canView, restErr := api.Hooks.Console.CanViewTopicConfig(r.Context(), topicName)
+			canView, restErr := api.Hooks.Authorization.CanViewTopicConfig(r.Context(), topicName)
 			if restErr != nil {
 				rest.SendRESTError(w, r, logger, restErr)
 				return
@@ -370,11 +469,11 @@ func (api *API) handleGetTopicConsumers() http.HandlerFunc {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		topicName := chi.URLParam(r, "topicName")
+		topicName := rest.GetURLParam(r, "topicName")
 		logger := api.Logger.With(zap.String("topic_name", topicName))
 
 		// Check if logged in user is allowed to view partitions for the given topic
-		canView, restErr := api.Hooks.Console.CanViewTopicConsumers(r.Context(), topicName)
+		canView, restErr := api.Hooks.Authorization.CanViewTopicConsumers(r.Context(), topicName)
 		if restErr != nil {
 			rest.SendRESTError(w, r, logger, restErr)
 			return
@@ -417,7 +516,7 @@ func (api *API) handleGetTopicsOffsets() http.HandlerFunc {
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 1. Parse topic names and timestamp from URL. It's a list of topic names that is comma separated
-		requestedTopicNames := r.URL.Query().Get("topicNames")
+		requestedTopicNames := rest.GetQueryParam(r, "topicNames")
 		if requestedTopicNames == "" {
 			restErr := &rest.Error{
 				Err:      fmt.Errorf("required parameter topicNames is missing"),
@@ -430,7 +529,7 @@ func (api *API) handleGetTopicsOffsets() http.HandlerFunc {
 		}
 		topicNames := strings.Split(requestedTopicNames, ",")
 
-		timestampStr := r.URL.Query().Get("timestamp")
+		timestampStr := rest.GetQueryParam(r, "timestamp")
 		if timestampStr == "" {
 			restErr := &rest.Error{
 				Err:      fmt.Errorf("required parameter timestamp is missing"),
@@ -455,7 +554,7 @@ func (api *API) handleGetTopicsOffsets() http.HandlerFunc {
 
 		// 2. Check if logged in user is allowed list partitions (always true for Kowl, but not for Kowl Business)
 		for _, topic := range topicNames {
-			canView, restErr := api.Hooks.Console.CanViewTopicPartitions(r.Context(), topic)
+			canView, restErr := api.Hooks.Authorization.CanViewTopicPartitions(r.Context(), topic)
 			if restErr != nil {
 				rest.SendRESTError(w, r, api.Logger, restErr)
 				return

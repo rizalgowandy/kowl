@@ -11,11 +11,13 @@ package git
 
 import (
 	"fmt"
-	"github.com/cloudhut/kowl/backend/pkg/filesystem"
-	"github.com/go-git/go-billy/v5"
-	"go.uber.org/zap"
 	"path"
 	"strings"
+
+	"github.com/go-git/go-billy/v5"
+	"go.uber.org/zap"
+
+	"github.com/redpanda-data/console/backend/pkg/filesystem"
 )
 
 func readFile(fileName string, fs billy.Filesystem, maxSize int64) ([]byte, error) {
@@ -25,7 +27,7 @@ func readFile(fileName string, fs billy.Filesystem, maxSize int64) ([]byte, erro
 	}
 	fileSize := fileInfo.Size()
 	if fileSize > maxSize {
-		return nil, fmt.Errorf("file size is larger than the expected maxSize of '%d' bytes", maxSize)
+		return nil, fmt.Errorf("file size of '%d' bytes is larger than the expected max size of '%d' bytes", fileSize, maxSize)
 	}
 
 	file, err := fs.Open(fileName)
@@ -78,9 +80,13 @@ func (c *Service) readFiles(fs billy.Filesystem, res map[string]filesystem.File,
 
 		key := trimmedFilename
 		if c.Cfg.IndexByFullFilepath {
-			pathWithoutBasepath := strings.Trim(path.Clean(strings.Replace(filePath, c.Cfg.Repository.BaseDirectory, "", 1)), "\\")
-			key = pathWithoutBasepath
-			filePath = pathWithoutBasepath
+			// If base is ".", don't strip dots from the path.
+			if c.Cfg.Repository.BaseDirectory != "." {
+				key = strings.Trim(path.Clean(strings.Replace(filePath, c.Cfg.Repository.BaseDirectory, "", 1)), "\\")
+			} else {
+				key = strings.Trim(path.Clean(filePath), "\\")
+			}
+			filePath = key
 		}
 		res[key] = filesystem.File{
 			Path:            filePath,

@@ -9,216 +9,112 @@
  * by the Apache License, Version 2.0
  */
 
-import React, { Component } from 'react';
-import { KafkaError, ConfigEntry, Topic } from '../../../state/restInterfaces';
-import { Tooltip, Popover, Checkbox, Empty, Typography, Button, Result, Statistic } from 'antd';
 import { observer } from 'mobx-react';
+import { Component } from 'react';
+import type { ConfigEntryExtended, KafkaError, Topic } from '../../../state/restInterfaces';
 import { uiSettings } from '../../../state/ui';
-import topicConfigInfo from '../../../assets/topicConfigInfo.json';
-import Paragraph from 'antd/lib/typography/Paragraph';
 import '../../../utils/arrayExtensions';
-import { HighlightTwoTone } from '@ant-design/icons';
-import { uiState } from '../../../state/uiState';
-import { DefaultSkeleton, findPopupContainer, OptionGroup } from '../../../utils/tsxUtils';
+import { Box, Button, Code, CodeBlock, Empty, Flex, Result } from '@redpanda-data/ui';
+import { computed, makeObservable } from 'mobx';
+import { appGlobal } from '../../../state/appGlobal';
 import { api } from '../../../state/backendApi';
 import { toJson } from '../../../utils/jsonUtils';
-import { appGlobal } from '../../../state/appGlobal';
-import { computed, makeObservable } from 'mobx';
-import { formatConfigValue } from '../../../utils/formatters/ConfigValueFormatter';
-import { ConfigList } from '../../misc/ConfigList';
-import { prettyBytesOrNA, prettyMilliseconds } from "../../../utils/utils";
-
-const { Text } = Typography;
+import { DefaultSkeleton } from '../../../utils/tsxUtils';
+import TopicConfigurationEditor from './TopicConfiguration';
 
 // todo: can we assume that config values for time and bytes will always be provided in the smallest units?
 // or is it possible we'll get something like 'segment.hours' instead of 'segment.ms'?
 
 // Full topic configuration
 @observer
-export class TopicConfiguration extends Component<{ topic: Topic }> {
+export class TopicConfiguration extends Component<{
+  topic: Topic;
+}> {
+  constructor(p: any) {
+    super(p);
+    makeObservable(this);
+  }
 
-    constructor(p: any) {
-        super(p);
-        makeObservable(this);
-    }
+  render() {
+    const renderedError = this.handleError();
+    if (renderedError) return renderedError;
 
+    const entries = api.topicConfig.get(this.props.topic.topicName)?.configEntries ?? [];
 
-    render() {
-        const renderedError = this.handleError();
-        if (renderedError) return renderedError;
+    return (
+      <>
+        <TopicConfigurationEditor
+          targetTopic={this.props.topic.topicName}
+          entries={entries}
+          onForceRefresh={() => {
+            api.refreshTopicConfig(this.props.topic.topicName, true);
+          }}
+        />
+      </>
+    );
+  }
 
-        return (
-            <>
-                <ConfigDisplaySettings />
-                <TopicConfigList configEntries={this.configEntries} />
-            </>
-        );
-    }
+  @computed get configEntries(): ConfigEntryExtended[] {
+    const config = api.topicConfig.get(this.props.topic.topicName);
+    if (config == null) return [];
 
-    @computed get configEntries(): ConfigEntry[] {
-        const config = api.topicConfig.get(this.props.topic.topicName);
-        if (config == null) return [];
-
-        return config.configEntries
-            .slice().sort((a, b) => {
-                switch (uiSettings.topicList.propsOrder) {
-                    case 'default':
-                        return 0;
-                    case 'alphabetical':
-                        return a.name.localeCompare(b.name);
-                    case 'changedFirst':
-                        if (uiSettings.topicList.propsOrder != 'changedFirst') return 0;
-                        const v1 = a.isExplicitlySet ? 1 : 0;
-                        const v2 = b.isExplicitlySet ? 1 : 0;
-                        return v2 - v1;
-                    default: return 0;
-                }
-            });
-    }
-
-    handleError(): JSX.Element | null {
-        const config = api.topicConfig.get(this.props.topic.topicName);
-        if (config === undefined) return DefaultSkeleton; // still loading
-        if (config && config.error) return this.renderKafkaError(this.props.topic.topicName, config.error);
-
-        if (config === null || config.configEntries.length == 0) {
-            // config===null should never happen, so we catch it together with empty
-            const desc = (
-                <>
-                    <Text type="secondary" strong style={{ fontSize: '125%' }}>
-                        No config entries
-                    </Text>
-                    <br />
-                </>
-            );
-            return <Empty description={desc} />;
+    return config.configEntries.slice().sort((a, b) => {
+      switch (uiSettings.topicList.propsOrder) {
+        case 'default':
+          return 0;
+        case 'alphabetical':
+          return a.name.localeCompare(b.name);
+        case 'changedFirst': {
+          if (uiSettings.topicList.propsOrder !== 'changedFirst') return 0;
+          const v1 = a.isExplicitlySet ? 1 : 0;
+          const v2 = b.isExplicitlySet ? 1 : 0;
+          return v2 - v1;
         }
-        return null;
+        default:
+          return 0;
+      }
+    });
+  }
+
+  handleError(): JSX.Element | null {
+    const config = api.topicConfig.get(this.props.topic.topicName);
+    if (config === undefined) return DefaultSkeleton; // still loading
+    if (config?.error) return this.renderKafkaError(this.props.topic.topicName, config.error);
+
+    if (config === null || config.configEntries.length === 0) {
+      // config===null should never happen, so we catch it together with empty
+      return <Empty description="No config entries" />;
     }
+    return null;
+  }
 
-    renderKafkaError(topicName: string, error: KafkaError) {
-        return (
-            <div style={{ marginBottom: '2em', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-                <div style={{ maxWidth: '800px', display: 'flex', flexDirection: 'column' }}>
-                    <Result
-                        style={{ margin: 0, padding: 0, marginTop: '1em' }}
-                        status="error"
-                        title="Kafka Error"
-                        subTitle={
-                            <>
-                                Kowl received the following error while fetching the configuration for topic <Text code>{topicName}</Text> from Kafka:
-                            </>
-                        }
-                    ></Result>
-                    <div style={{ margin: '1.5em 0', marginTop: '1em' }}>
-                        <div className="codeBox w100" style={{ padding: '0.5em 1em' }}>
-                            {toJson(error, 4)}
-                        </div>
-                    </div>
-                    <Button type="primary" size="large" onClick={() => appGlobal.onRefresh()} style={{ width: '12em', margin: '0', alignSelf: 'center' }}>
-                        Retry
-                    </Button>
-                </div>
-            </div>
-        );
-    }
-}
-
-
-
-const TopicConfigList = observer(({ configEntries }: { configEntries: ConfigEntry[] }) => {
-    return <ConfigList
-        configEntries={configEntries}
-        valueDisplay={uiSettings.topicList.valueDisplay}
-        renderTooltip={(e, content) => <FavoritePopover configEntry={e} children={content} />}
-    />
-});
-
-const ConfigDisplaySettings = observer(() => (
-    <div
-        style={{
-            marginLeft: '1px',
-            marginBottom: '1.5em',
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: '2em',
-            rowGap: '1em',
-        }}
-    >
-        <OptionGroup
-            label="Formatting"
-            options={{
-                Friendly: 'friendly',
-                Raw: 'raw',
-            }}
-            value={uiSettings.topicList.valueDisplay}
-            onChange={(s) => (uiSettings.topicList.valueDisplay = s)}
-        />
-
-        <OptionGroup
-            label="Sort"
-            options={{
-                None: 'default',
-                Alphabetical: 'alphabetical',
-                'Changed First': 'changedFirst',
-            }}
-            value={uiSettings.topicList.propsOrder}
-            onChange={(s) => (uiSettings.topicList.propsOrder = s)}
-        />
-    </div>
-));
-
-const markerIcon = <HighlightTwoTone twoToneColor="#1890ff" style={{ fontSize: '1.5em', marginRight: '.25em' }} />;
-
-export const FavoritePopover = observer((p: { configEntry: ConfigEntry, children: React.ReactNode }) => {
-    const { configEntry, children } = p;
-    const name = configEntry.name;
-    const favs = uiState.topicSettings.favConfigEntries;
-    const isFav = favs.includes(name);
-    const toggleFav = isFav ? () => favs.splice(favs.indexOf(name), 1) : () => favs.push(name);
-
-    const infoEntry = topicConfigInfo.find((e) => e.Name == name);
-
-    const popupContent = (
-        <div>
-            <Paragraph style={{ maxWidth: '400px' }}>
-                {infoEntry
-                    ? <div className='configPropDescription'>{infoEntry.Description}</div>
-                    : <div className='configPropDescription unknownConfigProp'>No description available, unknown property</div>
-                }
-            </Paragraph>
-
-            <Checkbox children="Show this setting in 'Quick Info'" checked={isFav} onChange={() => toggleFav()} />
-        </div>
-    );
-
+  renderKafkaError(topicName: string, error: KafkaError) {
     return (
-        <Popover
-            key={configEntry.name}
-            placement="right"
-            trigger="click"
-            title={<code>{name}</code>}
-            content={popupContent}
-        >
-            <div className="hoverLink" style={{ display: 'flex', verticalAlign: 'middle', cursor: 'pointer' }}>
-                {children}
-                {/* <div style={{ flexGrow: 1 }} /> */}
-            </div>
-        </Popover>
+      <Flex my={8} flexDirection="column" alignItems="center">
+        <Flex flexDirection="column" maxWidth="4xl">
+          <Result
+            status="error"
+            title="Kafka Error"
+            subTitle={
+              <>
+                Redpanda Console received the following error while fetching the configuration for topic{' '}
+                <Code p={1}>{topicName}</Code> from Kafka:
+              </>
+            }
+          />
+          <Box m={8}>
+            <CodeBlock language="raw" codeString={toJson(error, 4)} />
+          </Box>
+          <Button
+            variant="solid"
+            size="lg"
+            onClick={() => appGlobal.onRefresh()}
+            style={{ width: '12em', margin: '0', alignSelf: 'center' }}
+          >
+            Retry
+          </Button>
+        </Flex>
+      </Flex>
     );
-});
-
-export function DataValue(name: string, value: string, isDefault: boolean, formatType: 'friendly' | 'raw' | 'both') {
-    value = formatConfigValue(name, value, formatType);
-
-    if (isDefault) return <code>{value}</code>;
-
-    return (
-        <Tooltip title="Value is different from the default" getPopupContainer={findPopupContainer}>
-            <div>
-                {markerIcon}
-                <code>{value}</code>
-            </div>
-        </Tooltip>
-    );
+  }
 }

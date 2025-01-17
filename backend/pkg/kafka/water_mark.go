@@ -12,13 +12,17 @@ package kafka
 import (
 	"context"
 	"fmt"
+
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kmsg"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
 
 const (
-	TimestampLatest   = -1
+	// TimestampLatest is the enum that represents a request for the offsets with the most recent timestamp.
+	TimestampLatest = -1
+	// TimestampEarliest is the enum that represents a request for the offsets with the earliest timestamp.
 	TimestampEarliest = -2
 )
 
@@ -103,6 +107,8 @@ func (s *Service) GetPartitionMarks(ctx context.Context, topic string, partition
 	return partitionMarksByTopic[topic], nil
 }
 
+// ListOffsetsResponseTopicPartition is the partition scoped response for listing either
+// the earliest or oldest offset of that partition.
 type ListOffsetsResponseTopicPartition struct {
 	PartitionID int32
 	Offset      int64
@@ -181,7 +187,7 @@ func (s *Service) ListOffsets(ctx context.Context, topicPartitions map[string][]
 					PartitionID: p.Partition,
 					Offset:      p.Offset,
 					Timestamp:   p.Timestamp,
-					Err:         nil,
+					Err:         kerr.ErrorForCode(p.ErrorCode),
 				}
 			}
 			partitionsByTopic[topic.Topic] = partitions

@@ -9,422 +9,149 @@
  * by the Apache License, Version 2.0
  */
 
-/* eslint-disable no-useless-escape */
-import { Collapse, Skeleton } from 'antd';
-import { action, autorun, comparer, IReactionDisposer, makeObservable, observable, reaction } from 'mobx';
+import { Box, RadioGroup, Skeleton, Switch } from '@redpanda-data/ui';
 import { observer } from 'mobx-react';
-import { Component } from 'react';
+import { useState } from 'react';
+import { isEmbedded } from '../../../../config';
 import { api } from '../../../../state/backendApi';
-import { ConnectorProperty, DataType, PropertyWidth } from '../../../../state/restInterfaces';
-import { IsDev } from '../../../../utils/env';
-import { scrollTo } from "../../../../utils/utils";
-import { removeNamespace } from '../helper';
-import { DebugEditor } from './DebugEditor';
-import { PropertyGroupComponent } from './PropertyGroup';
-
+// import { IsDev } from '../../../../utils/env';
+// import { DebugEditor } from './DebugEditor';
+import type { ConnectorPropertiesStore, PropertyGroup } from '../../../../state/connect/state';
+import type { ConnectorStep } from '../../../../state/restInterfaces';
+import { clone } from '../../../../utils/jsonUtils';
+import KowlEditor from '../../../misc/KowlEditor';
+import { ConnectorStepComponent } from './ConnectorStep';
 
 export interface ConfigPageProps {
-    clusterName: string;
-    pluginClassName: string;
-    onChange: (jsonText: string) => void
+  connectorStore: ConnectorPropertiesStore;
+  context: 'CREATE' | 'EDIT';
 }
 
+export const ConfigPage: React.FC<ConfigPageProps> = observer(({ connectorStore, context }: ConfigPageProps) => {
+  if (connectorStore.error)
+    return (
+      <div>
+        <h3>Error</h3>
+        <div className="codeBox">{connectorStore.error}</div>
+      </div>
+    );
 
-@observer
-export class ConfigPage extends Component<ConfigPageProps> {
+  if (connectorStore.initPending) {
+    return <Skeleton mt={5} noOfLines={20} height={4} />;
+  }
 
-    @observable allGroups: PropertyGroup[] = [];
-    propsByName = new Map<string, Property>();
-    @observable jsonText = "";
-    @observable error: string | undefined = undefined;
+  if (connectorStore.allGroups.length === 0) return <div>debug: no groups</div>;
 
-    @observable initPending = true;
-    fallbackGroupName: string = "";
-    reactionDisposers: IReactionDisposer[] = [];
+  // Find all steps
+  const steps: {
+    step: ConnectorStep;
+    groups: PropertyGroup[];
+  }[] = [];
 
-    constructor(p: any) {
-        super(p);
-        makeObservable(this);
+  for (const step of connectorStore.connectorStepDefinitions) {
+    const groups = connectorStore.allGroups.filter((g) => g.step.stepIndex === step.stepIndex);
+    steps.push({ step, groups });
+  }
 
-        this.fallbackGroupName = removeNamespace(this.props.pluginClassName);
-        this.initConfig();
+  return (
+    <>
+      <Box mb="8">
+        <RadioGroup
+          name="settingsMode"
+          value={connectorStore.viewMode}
+          onChange={(x) => (connectorStore.viewMode = x)}
+          options={[
+            { value: 'form', label: <Box mx="4">Form</Box> },
+            { value: 'json', label: <Box mx="4">JSON</Box> },
+          ]}
+        />
+      </Box>
+
+      {connectorStore.viewMode === 'form' ? (
+        <>
+          <Switch
+            isChecked={connectorStore.showAdvancedOptions}
+            onChange={(s) => (connectorStore.showAdvancedOptions = s.target.checked)}
+          >
+            Show advanced options
+          </Switch>
+
+          {steps.map(({ step, groups }) => {
+            return (
+              <ConnectorStepComponent
+                key={step.stepIndex}
+                step={step}
+                groups={groups}
+                allGroups={connectorStore.allGroups}
+                showAdvancedOptions={connectorStore.showAdvancedOptions}
+                connectorType={connectorStore.connectorType}
+              />
+            );
+          })}
+        </>
+      ) : (
+        <>
+          <div style={{ margin: '0 auto 1.5rem' }}>
+            <ConnectorJsonEditor connectorStore={connectorStore} context={context} />
+          </div>
+        </>
+      )}
+    </>
+  );
+});
+
+function ConnectorJsonEditor(p: {
+  connectorStore: ConnectorPropertiesStore;
+  context: 'CREATE' | 'EDIT';
+}) {
+  const connectorStore = p.connectorStore;
+
+  // Initialize connector with existing data
+  const [jsonText, setJsonText] = useState(() => {
+    const configObj = connectorStore.getConfigObject();
+    const connectorName = (configObj as any)?.name;
+
+    if (connectorName) {
+      console.log('trying to obtain initial config from existing connector...', { name: connectorName });
+      const cluster = api.connectConnectors?.clusters?.first((c) => c.clusterName === connectorStore.clusterName);
+      const connector = cluster?.connectors.first((x) => x.name === connectorName);
+      if (connector) {
+        console.log('success! found connector config', {
+          clusterName: connectorStore.clusterName,
+          connectorName,
+          config: clone(connector.config),
+        });
+
+        return JSON.stringify(connector.config, undefined, 4);
+      }
+
+      console.log('unable to find existing connector for known connector name!', {
+        clusterName: connectorStore.clusterName,
+        connectorName,
+      });
     }
 
-    componentWillUnmount() {
-        for (const r of this.reactionDisposers)
-            r();
-    }
+    console.log('creating "new" config for connector', {
+      name: connectorName,
+      config: clone(configObj),
+    });
 
-    @action.bound async initConfig() {
-        const { clusterName, pluginClassName } = this.props;
+    return JSON.stringify(configObj, undefined, 4);
+  });
 
-        setTimeout(() => {
-            scrollTo('selectedConnector', 'start', -20);
-        }, 100);
-
-        try {
-            // Validate with empty object to get all properties initially
-            const validationResult = await api.validateConnectorConfig(clusterName, pluginClassName, {
-                "connector.class": pluginClassName,
-                "name": "",
-                "topic": "topic",
-                "topics": "topics",
-            });
-            const allProps = createCustomProperties(validationResult.configs, this.fallbackGroupName);
-
-            // Save props to map, so we can quickly find them to set their validation errors
-            for (const p of allProps)
-                this.propsByName.set(p.name, p);
-
-            // Set last error values, so we know when to show the validation error
-            for (const p of allProps)
-                if (p.errors.length > 0)
-                    p.lastErrorValue = p.value;
-
-            // Create groups
-            const groupNames = [this.fallbackGroupName, ...validationResult.groups];
-            this.allGroups = allProps
-                .groupInto(p => p.entry.definition.group)
-                .map(g => (observable({ groupName: g.key, properties: g.items, propertiesWithErrors: [] }) as PropertyGroup))
-                .sort((a, b) => groupNames.indexOf(a.groupName) - groupNames.indexOf(b.groupName));
-
-            // Let properties know about their parent group, so they can add/remove themselves in 'propertiesWithErrors'
-            for (const g of this.allGroups)
-                for (const p of g.properties)
-                    p.propertyGroup = g;
-
-            // Notify groups about errors in their children
-            for (const g of this.allGroups)
-                g.propertiesWithErrors.push(...g.properties.filter(p => p.showErrors));
-
-            // Update JSON
-            this.reactionDisposers.push(reaction(
-                () => {
-                    return this.getConfigObject();
-                },
-                (config) => {
-                    this.jsonText = JSON.stringify(config, undefined, 4);
-                    this.props.onChange(this.jsonText);
-                },
-                { delay: 100, fireImmediately: true, equals: comparer.structural }
-            ));
-
-            // Validate on changes
-            this.reactionDisposers.push(reaction(
-                () => {
-                    return this.getConfigObject();
-                },
-                (config) => {
-                    this.validate(config);
-                },
-                { delay: 300, fireImmediately: true, equals: comparer.structural }
-            ));
-
-        } catch (err: any) {
-            this.error = typeof err == 'object'
-                ? (err.message ?? JSON.stringify(err, undefined, 4))
-                : JSON.stringify(err, undefined, 4);
-        }
-
-        this.initPending = false;
-    }
-
-    getConfigObject(): object {
-        const config = {} as any;
-
-        for (const g of this.allGroups)
-            for (const p of g.properties) {
-
-                // Skip default values
-                if (p.entry.definition.required == false) {
-                    if (p.value == p.entry.definition.default_value)
-                        continue;
-                    if (p.value === false && !p.entry.definition.default_value)
-                        continue; // skip boolean values that default to false
-                }
-
-                // Skip null/undefined
-                if (p.value === null || p.value === undefined)
-                    continue;
-
-                // Skip empty values for strings
-                if (StringLikeTypes.includes(p.entry.definition.type))
-                    if (p.value == null || p.value == "")
-                        continue;
-
-                // Include the value
-                config[p.name] = p.value;
-            }
-
-        return config;
-    }
-
-    // todo:
-    // The code that handles validation/updating/adding/removing properties really shouldn't be part of this page-component
-    // It's too much code in here, it should be split out into some seperate class or something when we have time...
-    validate = action(async (config: object) => {
-
-
-        const { clusterName, pluginClassName } = this.props;
-        try {
-            // Validate the current config
-            const validationResult = await api.validateConnectorConfig(clusterName, pluginClassName, config);
-            const srcProps = createCustomProperties(validationResult.configs, this.fallbackGroupName);
-
-            // Remove properties that don't exist anymore
-            const srcNames = new Set(srcProps.map(x => x.name));
-            const removedProps = [...this.propsByName.keys()].filter(key => !srcNames.has(key));
-            for (const key of removedProps) {
-                // group names might not be accurate so we check all groups
-                for (const g of this.allGroups)
-                    g.properties.removeAll(x => x.name == key);
-
-                // remove from lookup
-                this.propsByName.delete(key);
-            }
-
-            // Remove empty groups
-            this.allGroups.removeAll(x => x.properties.length == 0);
-
-            // Handle new properties, transfer reported errors and suggested values
-            for (const source of srcProps) {
-                const target = this.propsByName.get(source.name);
-
-                // Add new property
-                if (!target) {
-                    this.propsByName.set(source.name, source);
-                    let group = this.allGroups.first(g => g.groupName == source.entry.definition.group);
-                    if (!group) {
-                        // Create new group
-                        group = observable({
-                            groupName: source.entry.definition.group,
-                            properties: [],
-                            propertiesWithErrors: [],
-                        } as PropertyGroup);
-
-                        this.allGroups.push(group);
-
-                        // Sort groups
-                        const groupNames = [this.fallbackGroupName, ...validationResult.groups];
-                        this.allGroups.sort((a, b) => groupNames.indexOf(a.groupName) - groupNames.indexOf(b.groupName));
-                    }
-
-                    group.properties.push(source);
-                    source.propertyGroup = group;
-
-                    // Sort properties within group
-                    group.properties.sort((a, b) => a.entry.definition.order - b.entry.definition.order);
-
-                    continue;
-                }
-
-                // Update: recommended values
-                const suggestedSrc = source.entry.value.recommended_values;
-                const suggestedTar = target.entry.value.recommended_values;
-                if (!suggestedSrc.isEqual(suggestedTar))
-                    suggestedTar.updateWith(suggestedSrc);
-
-                // Update: errors
-                if (!target.errors.isEqual(source.errors)) {
-
-                    if (source.errors.length > 0)
-                        target.lastErrors = [...source.errors]; // create copy, so 'updateWith' won't modify this array as well
-
-                    // Update
-                    target.errors.updateWith(source.errors);
-
-                    target.showErrors = target.errors.length > 0;
-
-                    // Show first error
-                    target.currentErrorIndex = 0;
-                    if (target.errors.length > 1) {
-                        // Skip over simple / unhelpful messages
-                        const betterStartValue = target.errors.findIndex(x => !x.includes('which has no default value'));
-                        if (betterStartValue > -1)
-                            target.currentErrorIndex = betterStartValue;
-                    }
-
-                    // Add or remove from parent group
-                    const hasErrors = target.errors.length > 0;
-                    if (hasErrors)
-                        target.propertyGroup.propertiesWithErrors.pushDistinct(target);
-                    else
-                        target.propertyGroup.propertiesWithErrors.remove(target);
-                }
-            }
-
-            // Set last error values, so we know when to show the validation error
-            for (const g of this.allGroups)
-                for (const p of g.properties)
-                    p.lastErrorValue = p.value;
-
-        } catch (err: any) {
-            console.error('error validating config', err);
-        }
-    })
-
-
-    render() {
-        if (this.error)
-            return <div>
-                <h3>Error</h3>
-                <div className='codeBox'>{this.error}</div>
-            </div>
-
-        if (this.initPending)
-            return <div><Skeleton loading={true} active={true} paragraph={{ rows: 20, width: '100%' }} /></div>
-
-        if (this.allGroups.length == 0)
-            return <div>debug: no groups</div>
-
-        const defaultExpanded = this.allGroups[0].groupName;
-
-        return <>
-            <Collapse defaultActiveKey={defaultExpanded} ghost bordered={false}>
-                {this.allGroups.filter(g => !g.groupName.startsWith('Transforms: ')).map(g =>
-                    <Collapse.Panel
-                        className={(g.propertiesWithErrors.length > 0) ? 'hasErrors' : ''}
-                        key={g.groupName}
-                        header={<div style={{ display: 'flex', alignItems: 'center', gap: '1em' }}>
-                            <span style={{ fontSize: 'larger', fontWeight: 600, fontFamily: 'Open Sans' }}>{g.groupName}</span>
-                            <span className='issuesTag'>{g.propertiesWithErrors.length} issues</span>
-                        </div>}
-                    >
-                        <PropertyGroupComponent group={g} allGroups={this.allGroups} />
-                    </Collapse.Panel>
-                )}
-            </Collapse>
-
-            {/* {IsDev && <DebugEditor observable={this} />} */}
-        </>;
-    }
+  return (
+    <KowlEditor
+      language="json"
+      value={jsonText}
+      height="600px"
+      onChange={(x) => {
+        if (!x) return;
+        setJsonText(x);
+        connectorStore.jsonText = x;
+      }}
+      options={{
+        readOnly: isEmbedded() && p.context === 'EDIT',
+      }}
+    />
+  );
 }
-
-const hiddenProperties = [
-    "connector.class" // user choses that in the first page of the wizard
-];
-
-const converters = [
-    "io.confluent.connect.avro.AvroConverter",
-    "io.confluent.connect.protobuf.ProtobufConverter",
-    "org.apache.kafka.connect.storage.StringConverter",
-    "org.apache.kafka.connect.json.JsonConverter",
-    "io.confluent.connect.json.JsonSchemaConverter",
-    "org.apache.kafka.connect.converters.ByteArrayConverter",
-];
-const suggestedValues: { [key: string]: string[] } = {
-    "key.converter": converters,
-    "value.converter": converters,
-    "header.converter": converters,
-    "config.action.reload": [
-        "restart",
-        "none"
-    ]
-};
-
-// Creates our Property objects, while fixing some issues with the source data
-// like: missing value, propertyWidth, group, ...
-function createCustomProperties(properties: ConnectorProperty[], fallbackGroupName: string): Property[] {
-
-    // Fix missing properties
-    for (const p of properties) {
-        const def = p.definition;
-
-        if (!def.width || def.width == PropertyWidth.None)
-            def.width = PropertyWidth.Medium;
-
-        if (!def.group)
-            def.group = fallbackGroupName;
-
-        if (def.order < 0)
-            def.order = Number.POSITIVE_INFINITY;
-    }
-
-    // Create our own properties
-    const allProps = properties
-        .map(p => {
-            const name = p.definition.name;
-
-            // Fix type of default values
-            let defaultValue: any = p.definition.default_value;
-            let initialValue: any = p.value.value;
-            if (p.definition.type == DataType.Boolean) {
-                // Boolean
-                // convert 'false' | 'true' to actual boolean values
-                if (typeof defaultValue == 'string')
-                    if (defaultValue.toLowerCase() == 'false')
-                        defaultValue = p.definition.default_value = false as any;
-                    else if (defaultValue.toLowerCase() == 'true')
-                        defaultValue = p.definition.default_value = true as any;
-
-                if (typeof initialValue == 'string')
-                    if (initialValue.toLowerCase() == 'false')
-                        initialValue = p.value.value = false as any;
-                    else if (initialValue.toLowerCase() == 'true')
-                        initialValue = p.value.value = true as any;
-            }
-            if (p.definition.type == DataType.Int || p.definition.type == DataType.Long || p.definition.type == DataType.Short) {
-                // Number
-                const n = Number.parseFloat(defaultValue);
-                if (Number.isFinite(n))
-                    defaultValue = p.definition.default_value = n as any;
-            }
-
-            let value: any = initialValue ?? defaultValue;
-            if (p.definition.type == DataType.Boolean && value == null)
-                value = false; // use 'false' as default for boolean
-
-            return observable({
-                name: name,
-                entry: p,
-                value: value,
-                isHidden: hiddenProperties.includes(name),
-                suggestedValues: suggestedValues[name],
-                errors: p.value.errors ?? [],
-
-                lastErrors: [],
-                showErrors: p.value.errors.length > 0,
-                currentErrorIndex: 0,
-                lastErrorValue: undefined as any,
-                propertyGroup: undefined as any,
-            } as Property);
-        })
-        .sort((a, b) => a.entry.definition.order - b.entry.definition.order);
-
-    return allProps;
-}
-
-
-export interface PropertyGroup {
-    groupName: string;
-    properties: Property[];
-
-    propertiesWithErrors: Property[];
-}
-
-export interface Property {
-    name: string;
-    entry: ConnectorProperty;
-    value: null | string | number | boolean | string[];
-
-    isHidden: boolean; // currently only used for "connector.class"
-    suggestedValues: undefined | string[]; // values that are not listed in entry.value.recommended_values
-
-
-    errors: string[];  // current errors
-
-    showErrors: boolean; // true = property has errors currently
-    lastErrors: string[];// previous errors, used so we can fade/animate them out when they get fixed
-    currentErrorIndex: number; // since we can only display one error at a time, we use this to cycle through
-    lastErrorValue: any; // the 'value' the property had at the last validation check (used so we can immediately hide the reported error once the user changes the value)
-
-    propertyGroup: PropertyGroup;
-}
-
-
-const StringLikeTypes = [
-    DataType.String,
-    DataType.Class,
-    DataType.List,
-    DataType.Password
-];

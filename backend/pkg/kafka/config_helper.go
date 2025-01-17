@@ -10,32 +10,35 @@
 package kafka
 
 import (
+	"context"
 	"crypto/tls"
-	"crypto/x509"
-	"encoding/pem"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"time"
 
-	"github.com/twmb/franz-go/pkg/sasl/aws"
-	"github.com/twmb/franz-go/pkg/sasl/oauth"
-
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/jcmturner/gokrb5/v8/client"
 	krbconfig "github.com/jcmturner/gokrb5/v8/config"
 	"github.com/jcmturner/gokrb5/v8/keytab"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kversion"
 	"github.com/twmb/franz-go/pkg/sasl"
+	"github.com/twmb/franz-go/pkg/sasl/aws"
 	"github.com/twmb/franz-go/pkg/sasl/kerberos"
+	"github.com/twmb/franz-go/pkg/sasl/oauth"
 	"github.com/twmb/franz-go/pkg/sasl/plain"
 	"github.com/twmb/franz-go/pkg/sasl/scram"
+	"github.com/twmb/franz-go/plugin/kzap"
 	"go.uber.org/zap"
+
+	"github.com/redpanda-data/console/backend/pkg/config"
 )
 
 // NewKgoConfig creates a new Config for the Kafka Client as exposed by the franz-go library.
 // If TLS certificates can't be read an error will be returned.
-func NewKgoConfig(cfg *Config, logger *zap.Logger, hooks kgo.Hook) ([]kgo.Opt, error) {
+//
+//nolint:gocognit,cyclop // This function is lengthy, but it's only plumbing configurations. Seems okay to me.
+func NewKgoConfig(cfg *config.Kafka, logger *zap.Logger, hooks kgo.Hook) ([]kgo.Opt, error) {
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(cfg.Brokers...),
 		kgo.MaxVersions(kversion.V2_6_0()),
@@ -43,18 +46,13 @@ func NewKgoConfig(cfg *Config, logger *zap.Logger, hooks kgo.Hook) ([]kgo.Opt, e
 		kgo.FetchMaxBytes(5 * 1000 * 1000), // 5MB
 		kgo.MaxConcurrentFetches(12),
 		// We keep control records because we need to consume them in order to know whether the last message in a
-		// a partition is worth waiting for or not (because it's a control record which we would never receive otherwise)
+		// partition is worth waiting for or not (because it's a control record which we would never receive otherwise)
 		kgo.KeepControlRecords(),
+		// Refresh metadata more often than the default, when the client notices that it's stale.
+		kgo.MetadataMinAge(time.Second),
+		kgo.WithLogger(kzap.New(logger.Named("kafka_client"))),
+		kgo.WithHooks(hooks),
 	}
-
-	// Create Logger
-	kgoLogger := KgoZapLogger{
-		logger: logger.With(zap.String("source", "kafka_client")).Sugar(),
-	}
-	opts = append(opts, kgo.WithLogger(kgoLogger))
-
-	// Attach hooks
-	opts = append(opts, kgo.WithHooks(hooks))
 
 	// Add Rack Awareness if configured
 	if cfg.RackID != "" {
@@ -64,7 +62,7 @@ func NewKgoConfig(cfg *Config, logger *zap.Logger, hooks kgo.Hook) ([]kgo.Opt, e
 	// Configure SASL
 	if cfg.SASL.Enabled {
 		// SASL Plain
-		if cfg.SASL.Mechanism == SASLMechanismPlain {
+		if cfg.SASL.Mechanism == config.SASLMechanismPlain {
 			mechanism := plain.Auth{
 				User: cfg.SASL.Username,
 				Pass: cfg.SASL.Password,
@@ -73,17 +71,17 @@ func NewKgoConfig(cfg *Config, logger *zap.Logger, hooks kgo.Hook) ([]kgo.Opt, e
 		}
 
 		// SASL SCRAM
-		if cfg.SASL.Mechanism == SASLMechanismScramSHA256 || cfg.SASL.Mechanism == SASLMechanismScramSHA512 {
+		if cfg.SASL.Mechanism == config.SASLMechanismScramSHA256 || cfg.SASL.Mechanism == config.SASLMechanismScramSHA512 {
 			var mechanism sasl.Mechanism
 			scramAuth := scram.Auth{
 				User: cfg.SASL.Username,
 				Pass: cfg.SASL.Password,
 			}
-			if cfg.SASL.Mechanism == SASLMechanismScramSHA256 {
+			if cfg.SASL.Mechanism == config.SASLMechanismScramSHA256 {
 				logger.Debug("configuring SCRAM-SHA-256 mechanism")
 				mechanism = scramAuth.AsSha256Mechanism()
 			}
-			if cfg.SASL.Mechanism == SASLMechanismScramSHA512 {
+			if cfg.SASL.Mechanism == config.SASLMechanismScramSHA512 {
 				logger.Debug("configuring SCRAM-SHA-512 mechanism")
 				mechanism = scramAuth.AsSha512Mechanism()
 			}
@@ -91,15 +89,28 @@ func NewKgoConfig(cfg *Config, logger *zap.Logger, hooks kgo.Hook) ([]kgo.Opt, e
 		}
 
 		// OAuth Bearer
-		if cfg.SASL.Mechanism == SASLMechanismOAuthBearer {
-			mechanism := oauth.Auth{
-				Token: cfg.SASL.OAUth.Token,
-			}.AsMechanism()
+		if cfg.SASL.Mechanism == config.SASLMechanismOAuthBearer {
+			var mechanism sasl.Mechanism
+			if cfg.SASL.OAUth.TokenEndpoint != "" {
+				mechanism = oauth.Oauth(func(ctx context.Context) (oauth.Auth, error) {
+					shortToken, err := cfg.SASL.OAUth.AcquireToken(ctx)
+					return oauth.Auth{
+						Token:      shortToken,
+						Extensions: kafkaSASLOAuthExtensionsToStrMap(cfg.SASL.OAUth.Extensions),
+					}, err
+				})
+			} else {
+				mechanism = oauth.Auth{
+					Token:      cfg.SASL.OAUth.Token,
+					Extensions: kafkaSASLOAuthExtensionsToStrMap(cfg.SASL.OAUth.Extensions),
+				}.AsMechanism()
+			}
+
 			opts = append(opts, kgo.SASL(mechanism))
 		}
 
 		// Kerberos
-		if cfg.SASL.Mechanism == SASLMechanismGSSAPI {
+		if cfg.SASL.Mechanism == config.SASLMechanismGSSAPI {
 			logger.Debug("configuring GSSAPI mechanism")
 			var krbClient *client.Client
 
@@ -136,78 +147,63 @@ func NewKgoConfig(cfg *Config, logger *zap.Logger, hooks kgo.Hook) ([]kgo.Opt, e
 		}
 
 		// AWS MSK IAM
-		if cfg.SASL.Mechanism == SASLMechanismAWSManagedStreamingIAM {
-			mechanism := aws.Auth{
-				AccessKey:    cfg.SASL.AWSMskIam.AccessKey,
-				SecretKey:    cfg.SASL.AWSMskIam.SecretKey,
-				SessionToken: cfg.SASL.AWSMskIam.SessionToken,
-				UserAgent:    cfg.SASL.AWSMskIam.UserAgent,
-			}.AsManagedStreamingIAMMechanism()
+		if cfg.SASL.Mechanism == config.SASLMechanismAWSManagedStreamingIAM {
+			var mechanism sasl.Mechanism
+			// when both are set, use them
+			if cfg.SASL.AWSMskIam.AccessKey != "" && cfg.SASL.AWSMskIam.SecretKey != "" {
+				// SessionToken is optional
+				mechanism = aws.Auth{
+					AccessKey:    cfg.SASL.AWSMskIam.AccessKey,
+					SecretKey:    cfg.SASL.AWSMskIam.SecretKey,
+					SessionToken: cfg.SASL.AWSMskIam.SessionToken,
+					UserAgent:    cfg.SASL.AWSMskIam.UserAgent,
+				}.AsManagedStreamingIAMMechanism()
+			} else {
+				ctx, cancel := context.WithTimeout(context.Background(), cfg.SASL.AWSMskIam.ClientTimeOutDuration)
+				defer cancel()
+				cfgVal, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(cfg.SASL.AWSMskIam.Region))
+				if err != nil {
+					return nil, err
+				}
+
+				mechanism = aws.ManagedStreamingIAM(func(ctx context.Context) (aws.Auth, error) {
+					creds, err := cfgVal.Credentials.Retrieve(ctx)
+					if err != nil {
+						return aws.Auth{}, err
+					}
+
+					return aws.Auth{
+						AccessKey:    creds.AccessKeyID,
+						SecretKey:    creds.SecretAccessKey,
+						SessionToken: creds.SessionToken,
+						UserAgent:    creds.Source,
+					}, nil
+				})
+			}
 			opts = append(opts, kgo.SASL(mechanism))
 		}
 	}
 
-	// Configure TLS
-	var caCertPool *x509.CertPool
 	if cfg.TLS.Enabled {
-		// Root CA
-		if cfg.TLS.CaFilepath != "" {
-			ca, err := ioutil.ReadFile(cfg.TLS.CaFilepath)
-			if err != nil {
-				return nil, err
-			}
-			caCertPool = x509.NewCertPool()
-			isSuccessful := caCertPool.AppendCertsFromPEM(ca)
-			if !isSuccessful {
-				logger.Warn("failed to append ca file to cert pool, is this a valid PEM format?")
-			}
-		}
-
-		// If configured load TLS cert & key - Mutual TLS
-		var certificates []tls.Certificate
-		if cfg.TLS.CertFilepath != "" && cfg.TLS.KeyFilepath != "" {
-			// 1. Read certificates
-			cert, err := ioutil.ReadFile(cfg.TLS.CertFilepath)
-			if err != nil {
-				return nil, fmt.Errorf("failed to TLS certificate: %w", err)
-			}
-
-			privateKey, err := ioutil.ReadFile(cfg.TLS.KeyFilepath)
-			if err != nil {
-				return nil, fmt.Errorf("failed to read TLS key: %w", err)
-			}
-
-			// 2. Check if private key needs to be decrypted. Decrypt it if passphrase is given, otherwise return error
-			pemBlock, _ := pem.Decode(privateKey)
-			if pemBlock == nil {
-				return nil, fmt.Errorf("no valid private key found")
-			}
-
-			if x509.IsEncryptedPEMBlock(pemBlock) {
-				decryptedKey, err := x509.DecryptPEMBlock(pemBlock, []byte(cfg.TLS.Passphrase))
-				if err != nil {
-					return nil, fmt.Errorf("private key is encrypted, but could not decrypt it: %s", err)
-				}
-				// If private key was encrypted we can overwrite the original contents now with the decrypted version
-				privateKey = pem.EncodeToMemory(&pem.Block{Type: pemBlock.Type, Bytes: decryptedKey})
-			}
-			tlsCert, err := tls.X509KeyPair(cert, privateKey)
-			if err != nil {
-				return nil, fmt.Errorf("cannot parse pem: %s", err)
-			}
-			certificates = []tls.Certificate{tlsCert}
+		tlsConfig, err := cfg.TLS.TLSConfig()
+		if err != nil {
+			return nil, fmt.Errorf("failed to build tls config: %w", err)
 		}
 
 		tlsDialer := &tls.Dialer{
 			NetDialer: &net.Dialer{Timeout: 10 * time.Second},
-			Config: &tls.Config{
-				InsecureSkipVerify: cfg.TLS.InsecureSkipTLSVerify,
-				Certificates:       certificates,
-				RootCAs:            caCertPool,
-			},
+			Config:    tlsConfig,
 		}
 		opts = append(opts, kgo.Dialer(tlsDialer.DialContext))
 	}
 
 	return opts, nil
+}
+
+func kafkaSASLOAuthExtensionsToStrMap(kafkaSASLOAuthExtensions []config.KafkaSASLOAuthExtension) map[string]string {
+	extensionMap := make(map[string]string)
+	for _, kafkaSASLOAuthExtension := range kafkaSASLOAuthExtensions {
+		extensionMap[kafkaSASLOAuthExtension.Key] = kafkaSASLOAuthExtension.Value
+	}
+	return extensionMap
 }

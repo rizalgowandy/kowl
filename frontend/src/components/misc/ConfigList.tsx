@@ -9,118 +9,136 @@
  * by the Apache License, Version 2.0
  */
 
-import { EditTwoTone, EyeInvisibleTwoTone, InfoCircleFilled, LockOutlined, LockTwoTone } from '@ant-design/icons';
-import { Popover, Table, Tooltip } from 'antd';
-import React, { useState } from 'react';
-import { ConfigEntry } from '../../state/restInterfaces';
-import { ValueDisplay } from '../../state/ui';
+import { MdInfoOutline, MdOutlineVisibilityOff } from 'react-icons/md';
+import colors from '../../colors';
+import type { ConfigEntry } from '../../state/restInterfaces';
+import type { ValueDisplay } from '../../state/ui';
 import { formatConfigValue } from '../../utils/formatters/ConfigValueFormatter';
-import { findPopupContainer } from '../../utils/tsxUtils';
-import { sortField } from './common';
+import { equalsIgnoreCase } from '../../utils/utils';
 
 import styles from './ConfigList.module.scss';
-import { KowlColumnType, KowlTable } from './KowlTable';
 
-export function ConfigList({ configEntries, valueDisplay, renderTooltip }: { configEntries: ConfigEntry[]; valueDisplay: ValueDisplay, renderTooltip?: (e: ConfigEntry, content: JSX.Element) => JSX.Element }) {
+import { Box, DataTable, Flex, Text, Tooltip } from '@redpanda-data/ui';
+import type { ColumnDef } from '@tanstack/react-table';
 
-    const columns: KowlColumnType<ConfigEntry>[] = [
-        {
-            title: 'Configuration',
-            dataIndex: 'name',
-            render: (text: string, record: ConfigEntry) => {
+export function ConfigList({
+  configEntries,
+  valueDisplay,
+  renderTooltip,
+}: {
+  configEntries: ConfigEntry[];
+  valueDisplay: ValueDisplay;
+  renderTooltip?: (e: ConfigEntry, content: JSX.Element) => JSX.Element;
+}) {
+  const allTypesUnknown = configEntries.all((x) => equalsIgnoreCase(x.type, 'unknown'));
 
-                let name = <div style={{ display: 'flex' }} className={styles.nameText}>{text}</div>;
-                if (renderTooltip) name = renderTooltip(record, name);
+  const tableColumns: ColumnDef<ConfigEntry>[] = [
+    {
+      header: 'Configuration',
+      accessorKey: 'name',
+      cell: ({ row: { original: record } }) => {
+        let name = <Flex className={styles.nameText}>{record.name}</Flex>;
+        if (renderTooltip) name = renderTooltip(record, name);
 
-                const explicitSet = record.isExplicitlySet && (
-                    <Tooltip overlay="Value was set explicitly">
-                        <EditTwoTone twoToneColor="#1890ff" />
-                    </Tooltip>
-                );
-                const sensitive = record.isSensitive && (
-                    <Tooltip overlay="Value has been redacted because it's sensitive">
-                        <EyeInvisibleTwoTone twoToneColor="#1890ff" />
-                    </Tooltip>
-                );
+        const sensitive = record.isSensitive && (
+          <Tooltip label="Value has been redacted because it's sensitive" placement="top" hasArrow>
+            <Box>
+              <MdOutlineVisibilityOff color={colors.brandOrange} />
+            </Box>
+          </Tooltip>
+        );
 
-                return <div className={styles.name}>
-                    {name}
-                    <span className={styles.configFlags}>
-                        {/* {explicitSet} */}
-                        {sensitive}
-                    </span>
-                </div>;
-            }
+        return (
+          <div className={styles.name}>
+            {name}
+            <span className={styles.configFlags}>{sensitive}</span>
+          </div>
+        );
+      },
+    },
+    {
+      header: 'Value',
+      accessorKey: 'value',
+      size: Number.POSITIVE_INFINITY,
+      cell: ({ row: { original: record } }) => (
+        <Text wordBreak="break-all" whiteSpace="break-spaces" className={styles.value}>
+          {formatConfigValue(record.name, record.value, valueDisplay)}
+        </Text>
+      ),
+    },
+  ];
+
+  if (!allTypesUnknown) {
+    tableColumns.push({
+      header: 'Type',
+      size: 120,
+      accessorKey: 'type',
+      cell: ({
+        row: {
+          original: { type },
         },
-        {
-            title: 'Value',
-            dataIndex: 'value',
-            render: (_: unknown, record: Partial<ConfigEntry>) => (
-                <span className={styles.value}>
-                    {formatConfigValue(record.name as string, record.value as string, valueDisplay)}
-                </span>
-            ),
-        },
-        {
-            title: 'Type', width: '120px',
-            dataIndex: 'type',
-            render: (text: string) => <span className={styles.type}>{text?.toLowerCase()}</span>,
-            filterType: { type: 'enum', toDisplay: x => String(x).toLowerCase(), optionClassName: 'capitalize' },
-            sorter: sortField('type')
-        },
-        {
-            title: (
-                <span className={styles.sourceHeader}>
-                    Source
-                    <Tooltip
-                        overlay={<div style={{ width: '300px', textAlign: 'left' }}><p>Resources can be configured at different levels. Example: A topic config may be inherited from the static broker config.</p><p>Valid sources are: Dynamic Topic, Dynamic Broker, Default Broker, Static Broker, Dynamic Broker Logger and Default config.</p></div>}
-                        title="Source"
-                        trigger="hover"
-                        placement="left"
-                        getPopupContainer={findPopupContainer}>
-                        <InfoCircleFilled style={{ color: '#bbbbbb' }} />
-                    </Tooltip>
-                </span>
-            ),
-            dataIndex: 'source', width: '180px',
-            render: (text: string) =>
-                <span className={styles.source}>{text
-                    .toLowerCase()
-                    .split('_')
-                    .join(' ')}
-                </span>,
-            filterType: { type: 'enum', toDisplay: x => x.toLowerCase().split('_').join(' '), optionClassName: 'capitalize' },
-            sorter: sortField('source')
+      }) => <span className={styles.type}>{type?.toLowerCase()}</span>,
+    });
+  }
 
-        },
-    ];
+  tableColumns.push({
+    id: 'source',
+    header: () => (
+      <span className={styles.sourceHeader}>
+        Source
+        <Tooltip
+          label={
+            <>
+              <p>
+                Resources can be configured at different levels. Example: A topic config may be inherited from the
+                static broker config.
+              </p>
+              <p>
+                Valid sources are: Dynamic Topic, Dynamic Broker, Default Broker, Static Broker, Dynamic Broker Logger
+                and Default config.
+              </p>
+            </>
+          }
+          placement="left"
+          hasArrow
+        >
+          <Box>
+            <MdInfoOutline size={12} />
+          </Box>
+        </Tooltip>
+      </span>
+    ),
+    size: 180,
+    accessorKey: 'source',
+    cell: ({
+      row: {
+        original: { source },
+      },
+    }) => <span className={styles.source}>{source?.toLowerCase().split('_').join(' ')}</span>,
+  });
 
-    return (
-        <KowlTable className={styles.configEntryTable}
-
-            dataSource={configEntries}
-            columns={columns}
-
-            pagination={{
-                visible: false,
-                defaultPageSize: 10000,
-            }}
-
-            expandable={{
-                childrenColumnName: "synonyms",
-                indentSize: 20,
-            }}
-            search={{
-                searchColumnIndex: 0,
-                isRowMatch: (row, regex) => {
-                    if (row.name && regex.test(row.name)) return true;
-                    if (row.value && regex.test(row.value)) return true;
-                    return false;
-                }
-            }}
-
-            rowKey="name"
-            rowClassName={(record) => (record.isExplicitlySet ? styles.overidden : styles.default)}
-        />
-    );
+  return (
+    <DataTable<ConfigEntry>
+      data={configEntries}
+      pagination={false}
+      sorting={false}
+      getRowCanExpand={(row) => (row.original.synonyms?.length ?? 0) > 0}
+      subComponent={({ row }) => {
+        if (!row.original.synonyms?.length) {
+          return null;
+        }
+        return (
+          <Box py={6} px={10}>
+            <DataTable<ConfigEntry>
+              // @ts-ignore TODO - we need to fix types here and find a shared interface
+              data={row.original.synonyms}
+              columns={tableColumns}
+            />
+          </Box>
+        );
+      }}
+      rowClassName={(row) => (row.original.isExplicitlySet ? styles.overidden : styles.default)}
+      columns={tableColumns}
+    />
+  );
 }

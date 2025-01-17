@@ -12,13 +12,14 @@ package main
 import (
 	"go.uber.org/zap"
 
-	"github.com/cloudhut/kowl/backend/pkg/api"
+	"github.com/redpanda-data/console/backend/pkg/api"
+	"github.com/redpanda-data/console/backend/pkg/config"
 )
 
 func main() {
 	startupLogger := zap.NewExample()
 
-	cfg, err := api.LoadConfig(startupLogger)
+	cfg, err := config.LoadConfig(startupLogger)
 	if err != nil {
 		startupLogger.Fatal("failed to load config", zap.Error(err))
 	}

@@ -9,114 +9,158 @@
  * by the Apache License, Version 2.0
  */
 
-import { observer } from "mobx-react";
-import { Empty, Button, Alert } from "antd";
-import { ColumnProps } from "antd/lib/table";
-import { PageComponent, PageInitHelper } from "../Page";
-import { api } from "../../../state/backendApi";
-import { uiSettings } from "../../../state/ui";
-import { sortField } from "../../misc/common";
-import { motion } from "framer-motion";
-import { animProps } from "../../../utils/animationProps";
-import { computed, makeObservable } from "mobx";
-import { appGlobal } from "../../../state/appGlobal";
-import Card from "../../misc/Card";
-import { DefaultSkeleton } from "../../../utils/tsxUtils";
-import { KowlTable } from "../../misc/KowlTable";
-import { LockIcon, SkipIcon } from "@primer/octicons-react";
-import { toJson } from "../../../utils/jsonUtils";
-import { prettyBytes, prettyNumber } from "../../../utils/utils";
-import { QuotaType } from "../../../state/restInterfaces";
+import { SkipIcon } from '@primer/octicons-react';
+import { Alert, AlertIcon, Button, DataTable, Result } from '@redpanda-data/ui';
+import { computed, makeObservable } from 'mobx';
+import { observer } from 'mobx-react';
+import { appGlobal } from '../../../state/appGlobal';
+import { api } from '../../../state/backendApi';
+import { type QuotaResponseSetting, QuotaType } from '../../../state/restInterfaces';
+import { toJson } from '../../../utils/jsonUtils';
+import { DefaultSkeleton, InfoText } from '../../../utils/tsxUtils';
+import { prettyBytes, prettyNumber } from '../../../utils/utils';
+import PageContent from '../../misc/PageContent';
+import Section from '../../misc/Section';
+import { PageComponent, type PageInitHelper } from '../Page';
 
 @observer
 class QuotasList extends PageComponent {
-    constructor(p: any) {
-        super(p);
-        makeObservable(this);
-    }
+  constructor(p: any) {
+    super(p);
+    makeObservable(this);
+  }
 
-    initPage(p: PageInitHelper): void {
-        p.title = 'Quotas';
-        p.addBreadcrumb('Quotas', '/quotas');
+  initPage(p: PageInitHelper): void {
+    p.title = 'Quotas';
+    p.addBreadcrumb('Quotas', '/quotas');
 
-        this.refreshData(false);
-        appGlobal.onRefresh = () => this.refreshData(true);
-    }
+    this.refreshData(true);
+    appGlobal.onRefresh = () => this.refreshData(true);
+  }
 
-    refreshData(force: boolean) {
-        if (api.userData != null && !api.userData.canListQuotas) return;
-        api.refreshQuotas(force);
-    }
+  refreshData(force: boolean) {
+    if (api.userData != null && !api.userData.canListQuotas) return;
+    api.refreshQuotas(force);
+  }
 
-    render() {
-        if (api.userData != null && !api.userData.canListQuotas) return PermissionDenied;
-        if (api.Quotas === undefined) return DefaultSkeleton;
+  render() {
+    if (api.userData != null && !api.userData.canListQuotas) return PermissionDenied;
+    if (api.Quotas === undefined) return DefaultSkeleton;
 
-        const warning = api.Quotas === null
-            ? <Alert type="warning" message="You do not have the necessary permissions to view Quotas" showIcon style={{ marginBottom: '1em' }} />
-            : null;
+    const warning =
+      api.Quotas === null ? (
+        <Alert variant="solid" status="warning" style={{ marginBottom: '1em' }}>
+          <AlertIcon />
+          You do not have the necessary permissions to view Quotas
+        </Alert>
+      ) : null;
 
-        const resources = this.quotasList;
-        const formatBytes = (x: undefined | number) => x ? prettyBytes(x) : <span style={{ opacity: 0.30 }}><SkipIcon /></span>
-        const formatRate = (x: undefined | number) => x ? prettyNumber(x) : <span style={{ opacity: 0.30 }}><SkipIcon /></span>
-        const formatPercentage = (x: undefined | number) => x ? `${x}%` : <span style={{ opacity: 0.30 }}><SkipIcon /></span>
+    const resources = this.quotasList;
+    const formatBytes = (x: undefined | number) =>
+      x ? (
+        prettyBytes(x)
+      ) : (
+        <span style={{ opacity: 0.3 }}>
+          <SkipIcon />
+        </span>
+      );
+    const formatRate = (x: undefined | number) =>
+      x ? (
+        prettyNumber(x)
+      ) : (
+        <span style={{ opacity: 0.3 }}>
+          <SkipIcon />
+        </span>
+      );
 
-        const columns: ColumnProps<typeof resources[0]>[] = [
-            { width: '100px', title: 'Type', dataIndex: 'entityType', sorter: sortField('entityType'), defaultSortOrder: 'ascend' },
-            { width: 'auto', title: 'Name', dataIndex: 'entityName', sorter: sortField('entityName') },
-            { width: '100px', title: 'Producer Rate', render: (_, e) => formatBytes(e.settings.first(k => k.key == QuotaType.PRODUCER_BYTE_RATE)?.value) },
-            { width: '100px', title: 'Consumer Rate', render: (_, e) => formatBytes(e.settings.first(k => k.key == QuotaType.CONSUMER_BYTE_RATE)?.value) },
-            { width: '100px', title: 'Connection Creation Rate', render: (_, e) => formatRate(e.settings.first(k => k.key == QuotaType.CONNECTION_CREATION_RATE)?.value) },
-            { width: '100px', title: 'Request Handler', render: (_, e) => formatPercentage(e.settings.first(k => k.key == QuotaType.REQUEST_PERCENTAGE)?.value) },
-        ];
+    return (
+      <>
+        <PageContent>
+          <Section>
+            {warning}
 
-        return <>
-            <motion.div {...animProps} style={{ margin: '0 1rem' }}>
+            <DataTable<{
+              eqKey: string;
+              entityType: 'client-id' | 'user' | 'ip';
+              entityName?: string | undefined;
+              settings: QuotaResponseSetting[];
+            }>
+              data={resources}
+              columns={[
+                {
+                  size: 100, // Assuming '100px' translates to '100'
+                  header: 'Type',
+                  accessorKey: 'entityType',
+                },
+                {
+                  size: 100, // 'auto' width replaced with an example number
+                  header: 'Name',
+                  accessorKey: 'entityName',
+                },
+                {
+                  size: 100,
+                  header: () => <InfoText tooltip="Limit throughput of produce requests">Producer Rate</InfoText>,
+                  accessorKey: 'producerRate',
+                  cell: ({ row: { original } }) =>
+                    formatBytes(original.settings.first((k) => k.key === QuotaType.PRODUCER_BYTE_RATE)?.value),
+                },
+                {
+                  size: 100,
+                  header: () => <InfoText tooltip="Limit throughput of fetch requests">Consumer Rate</InfoText>,
+                  accessorKey: 'consumerRate',
+                  cell: ({ row: { original } }) =>
+                    formatBytes(original.settings.first((k) => k.key === QuotaType.CONSUMER_BYTE_RATE)?.value),
+                },
+                {
+                  size: 100,
+                  header: () => (
+                    <InfoText tooltip="Limit rate of topic mutation requests, including create, add, and delete partition, in number of partitions per second">
+                      Controller Mutation Rate
+                    </InfoText>
+                  ),
+                  accessorKey: 'controllerMutationRate',
+                  cell: ({ row: { original } }) =>
+                    formatRate(original.settings.first((k) => k.key === QuotaType.CONTROLLER_MUTATION_RATE)?.value),
+                },
+              ]}
+            />
+          </Section>
+        </PageContent>
+      </>
+    );
+  }
 
-                <Card>
-                    {warning}
+  @computed get quotasList() {
+    const quotaResponse = api.Quotas;
+    if (!quotaResponse || quotaResponse.error) return [];
 
-                    <KowlTable
-                        dataSource={resources}
-                        columns={columns}
-
-                        observableSettings={uiSettings.quotasList}
-
-                        rowKey={x => x.eqKey}
-                        rowClassName={() => 'pureDisplayRow'}
-                    />
-                </Card>
-            </motion.div>
-        </>
-    }
-
-    @computed get quotasList() {
-        const quotaResponse = api.Quotas;
-        if (!quotaResponse || quotaResponse.error) return [];
-        
-        return quotaResponse.items.map(x => ({ ...x, eqKey: toJson(x) }));
-    }
+    return quotaResponse.items.map((x) => ({ ...x, eqKey: toJson(x) }));
+  }
 }
 
-const PermissionDenied = <>
-    <motion.div {...animProps} key={'quotasNoPerms'} style={{ margin: '0 1rem' }}>
-        <Card style={{ padding: '2rem 2rem', paddingBottom: '3rem' }}>
-            <Empty description={null}>
-                <div style={{ marginBottom: '1.5rem' }}>
-                    <h2><span><LockIcon verticalAlign='middle' size={20} /></span> Permission Denied</h2>
-                    <p>
-                        You are not allowed to view this page.
-                        <br />
-                        Contact the administrator if you think this is an error.
-                    </p>
-                </div>
-
-                <a target="_blank" rel="noopener noreferrer" href="https://github.com/cloudhut/kowl/blob/master/docs/authorization/roles.md">
-                    <Button type="primary">Kowl documentation for roles and permissions</Button>
-                </a>
-            </Empty>
-        </Card>
-    </motion.div>
-</>
+const PermissionDenied = (
+  <>
+    <PageContent key="quotasNoPerms">
+      <Section>
+        <Result
+          title="Forbidden"
+          status={403}
+          userMessage={
+            <p>
+              You are not allowed to view this page.
+              <br />
+              Contact the administrator if you think this is an error.
+            </p>
+          }
+          extra={
+            <a target="_blank" rel="noopener noreferrer" href="https://docs.redpanda.com/docs/manage/console/">
+              <Button variant="solid">Redpanda Console documentation for roles and permissions</Button>
+            </a>
+          }
+        />
+      </Section>
+    </PageContent>
+  </>
+);
 
 export default QuotasList;

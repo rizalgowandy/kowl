@@ -11,103 +11,107 @@ package api
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/go-chi/chi"
+	"github.com/cloudhut/common/rest"
+	"github.com/go-chi/chi/v5"
+	"go.uber.org/zap"
 )
 
-var (
-	// BasePathCtxKey is a helper to avoid allocations, idea taken from chi
-	BasePathCtxKey = &struct{ name string }{"ConsoleURLPrefix"}
-)
+// BasePathCtxKey is a helper to avoid allocations, idea taken from chi
+var BasePathCtxKey = &struct{ name string }{"ConsoleURLPrefix"}
 
-// Uses checks if X-Forwarded-Prefix or settings.basePath are set,
-// and then strips the set prefix from any requests.
-// When a prefix is set, this function adds it under the key 'BasePathCtxKey' to the context
-func createHandleBasePathMiddleware(basePath string, useXForwardedPrefix bool, stripPrefix bool) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		fn := func(w http.ResponseWriter, r *http.Request) {
-			prefix := ""
+type basePathMiddleware struct {
+	// basePath is the static base path that shall be applied.
+	basePath string
+	// useDynamicBasePathFromHeaders inherits the base-path from the X-Forwarded-Prefix header.
+	useDynamicBasePathFromHeaders bool
+	// If a base-path is set (either by the 'base-path' setting, or by the 'X-Forwarded-Prefix' header),
+	// they will be removed from the request url. You probably want to leave this enabled, unless you
+	// are using a proxy that can remove the prefix automatically (like Traefik's 'StripPrefix' option)
+	stripPrefix bool
+}
 
-			// Static base path (from settings)
-			if len(basePath) > 0 {
-				prefix = basePath
-			}
-
-			// Dynamic base path (from header)
-			if useXForwardedPrefix {
-				xForwardedPrefix := r.Header.Get("X-Forwarded-Prefix")
-				if len(xForwardedPrefix) > 0 {
-					prefix = xForwardedPrefix
-				}
-			}
-
-			// If we have a prefix...
-			if len(prefix) > 0 {
-				// ensure correct prefix slashes
-				prefix = ensurePrefixFormat(prefix)
-
-				// Store prefix in context so handle_frontend can use it to inject it into the html
-				r = r.WithContext(context.WithValue(r.Context(), BasePathCtxKey, prefix))
-
-				// Remove it from the request url (if allowed by settings)
-				if stripPrefix {
-					var path string
-					rctx := chi.RouteContext(r.Context())
-					if rctx.RoutePath != "" {
-						path = rctx.RoutePath
-					} else {
-						path = r.URL.Path
-					}
-
-					// route path
-					if strings.HasPrefix(path, prefix) {
-						rctx.RoutePath = "/" + strings.TrimPrefix(path, prefix)
-					}
-
-					// URL.path
-					if strings.HasPrefix(r.URL.Path, prefix) {
-						r.URL.Path = "/" + strings.TrimPrefix(r.URL.Path, prefix)
-					}
-
-					// requestURI
-					if strings.HasPrefix(r.RequestURI, prefix) {
-						r.RequestURI = "/" + strings.TrimPrefix(r.RequestURI, prefix)
-					}
-				}
-			}
-
-			next.ServeHTTP(w, r)
-		}
-		return http.HandlerFunc(fn)
+func newBasePathMiddleware(basePath string, useDynamicBasePathFromHeaders, stripPrefix bool) *basePathMiddleware {
+	return &basePathMiddleware{
+		basePath:                      basePath,
+		useDynamicBasePathFromHeaders: useDynamicBasePathFromHeaders,
+		stripPrefix:                   stripPrefix,
 	}
 }
 
-func requirePrefix(prefix string) func(http.Handler) http.Handler {
-	prefix = ensurePrefixFormat(prefix)
-	prefix = strings.TrimSuffix(prefix, "/") // don't require trailing slash
-
-	return func(next http.Handler) http.Handler {
-		fn := func(w http.ResponseWriter, r *http.Request) {
-
-			if !strings.HasPrefix(r.RequestURI, prefix) {
-				w.WriteHeader(http.StatusNotFound)
-				return
-			}
-
-			next.ServeHTTP(w, r)
+// Wrap implements the middleware interface. It propagates the basePath that shall be used
+// to the frontend by injecting it into the HTML as a variable. The frontend therefore knows
+// the to be used basePath without sending an HTTP request.
+// The basePath can be either a static configuration or dynamically set based on the
+// request header 'X-Forwarded-Prefix'.
+// Additionally, it may be in charge of stripping the prefix from any requests.
+func (b *basePathMiddleware) Wrap(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		prefix := b.basePath
+		if b.useDynamicBasePathFromHeaders && r.Header.Get("X-Forwarded-Prefix") != "" {
+			prefix = r.Header.Get("X-Forwarded-Prefix")
 		}
-		return http.HandlerFunc(fn)
-	}
+		if prefix == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// ensure correct prefix slashes
+		prefix = ensurePrefixFormat(prefix)
+
+		// Store prefix in context so handle_frontend can use it to inject it into the html
+		r = r.WithContext(context.WithValue(r.Context(), BasePathCtxKey, prefix))
+
+		if !b.stripPrefix {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Strip prefix from the request url
+		var path string
+		rctx := chi.RouteContext(r.Context())
+		switch {
+		case rctx.RoutePath != "":
+			path = rctx.RoutePath
+		case r.URL.RawPath != "":
+			path = r.URL.RawPath
+		default:
+			path = r.URL.Path
+		}
+
+		// route path
+		if strings.HasPrefix(path, prefix) {
+			rctx.RoutePath = "/" + strings.TrimPrefix(path, prefix)
+		}
+
+		// URL.path
+		if strings.HasPrefix(r.URL.Path, prefix) {
+			r.URL.Path = "/" + strings.TrimPrefix(r.URL.Path, prefix)
+		}
+
+		// URL.RawPath
+		if strings.HasPrefix(r.URL.RawPath, prefix) {
+			r.URL.RawPath = "/" + strings.TrimPrefix(r.URL.RawPath, prefix)
+		}
+
+		// requestURI
+		if strings.HasPrefix(r.RequestURI, prefix) {
+			r.RequestURI = "/" + strings.TrimPrefix(r.RequestURI, prefix)
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
-// prefix must start and end with a slash
+// ensurePrefixFormat ensures that the given path starts and ends with a slash
 func ensurePrefixFormat(path string) string {
-	if len(path) == 0 || (len(path) == 1 && path[0] == '/') {
-		return "" // nil / empty / slash
+	isRootPath := len(path) == 1 && path[0] == '/'
+	if path == "" || isRootPath {
+		return ""
 	}
 
 	// add leading slash
@@ -117,7 +121,7 @@ func ensurePrefixFormat(path string) string {
 
 	// add trailing slash
 	if !strings.HasSuffix(path, "/") {
-		path = path + "/"
+		path += "/"
 	}
 
 	return path
@@ -126,10 +130,11 @@ func ensurePrefixFormat(path string) string {
 // Creates a middleware that adds the build timestamp as a header to each response.
 // The frontend uses this object to detect if the backend server has been updated,
 // and therefore knows when the Single Page Application should be reloaded as well.
-func createSetVersionInfoHeader(builtAt time.Time) func(next http.Handler) http.Handler {
-	buildTimestamp := builtAt
-	if buildTimestamp.IsZero() {
-		buildTimestamp = time.Now()
+func createSetVersionInfoHeader(builtAt string) func(next http.Handler) http.Handler {
+	buildTimestamp := time.Now()
+	// Try to parse given string from ldflags as a timestamp
+	if timestampInt, err := strconv.Atoi(builtAt); err == nil {
+		buildTimestamp = time.Unix(int64(timestampInt), 0)
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -138,5 +143,26 @@ func createSetVersionInfoHeader(builtAt time.Time) func(next http.Handler) http.
 			next.ServeHTTP(w, r)
 		}
 		return http.HandlerFunc(fn)
+	}
+}
+
+// forceLoopbackMiddleware blocks requests not coming from the loopback interface.
+func forceLoopbackMiddleware(logger *zap.Logger) func(next http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			addr, ok := r.Context().Value(http.LocalAddrContextKey).(*net.TCPAddr)
+			if !ok {
+				logger.Info("request does not contain interface binding information")
+				rest.HandleNotFound(logger).ServeHTTP(w, r)
+				return
+			}
+			if !addr.IP.IsLoopback() {
+				logger.Info("blocking request not directed to the loopback interface")
+				rest.HandleNotFound(logger).ServeHTTP(w, r)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
 	}
 }

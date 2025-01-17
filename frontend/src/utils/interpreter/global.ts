@@ -8,14 +8,10 @@
  * the Business Source License, use of this software will be governed
  * by the Apache License, Version 2.0
  */
-
-
-/*eslint @typescript-eslint/no-namespace: off */
-
 declare namespace NodeJS {
-    interface Global {
-        value: any;
-    }
+  interface Global {
+    value: any;
+  }
 }
 
 global.value = {};

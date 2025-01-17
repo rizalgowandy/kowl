@@ -9,56 +9,100 @@
  * by the Apache License, Version 2.0
  */
 
-import React from 'react';
 import { observer } from 'mobx-react';
-import { sortField } from '../../../misc/common';
-import Table, { ColumnProps, TablePaginationConfig } from 'antd/lib/table';
 import { toJson } from '../../../../utils/jsonUtils';
-import { Alert } from 'antd';
 
-import type { AclResponse } from '../../../../state/restInterfaces';
+import { Alert, AlertIcon, DataTable } from '@redpanda-data/ui';
+import type {
+  AclRule,
+  AclStrOperation,
+  AclStrPermission,
+  AclStrResourcePatternType,
+  AclStrResourceType,
+  GetAclOverviewResponse,
+} from '../../../../state/restInterfaces';
 
-type Acls = AclResponse | null | undefined;
+type Acls = GetAclOverviewResponse | null | undefined;
 
 interface AclListProps {
-    acl: Acls;
-    onChange?: (config: TablePaginationConfig) => void;
-    paginationConfig?: TablePaginationConfig;
+  acl: Acls;
 }
 
 function flatResourceList(store: Acls) {
-    const acls = store;
-    if (acls?.aclResources == null) return [];
-    const flatResources = acls.aclResources
-        .map((res) => res.acls.map((rule) => ({ ...res, ...rule })))
-        .flat()
-        .map((x) => ({ ...x, eqKey: toJson(x) }));
-    return flatResources;
+  const acls = store;
+  if (acls?.aclResources == null) return [];
+  const flatResources = acls.aclResources
+    .flatMap((res) => res.acls.map((rule) => ({ ...res, ...rule })))
+    .map((x) => ({ ...x, eqKey: toJson(x) }));
+  return flatResources;
 }
 
-export default observer(function ({ acl, onChange, paginationConfig }: AclListProps) {
-    const resources = flatResourceList(acl);
-    const columns: ColumnProps<typeof resources[0]>[] = [
-        { width: '120px', title: 'Resource', dataIndex: 'resourceType', sorter: sortField('resourceType'), defaultSortOrder: 'ascend' },
-        { width: '120px', title: 'Permission', dataIndex: 'permissionType', sorter: sortField('permissionType') },
-        { width: 'auto', title: 'Principal', dataIndex: 'principal', sorter: sortField('principal') },
-        { width: '160px', title: 'Operation', dataIndex: 'operation', sorter: sortField('operation') },
-        { width: 'auto', title: 'PatternType', dataIndex: 'resourcePatternType', sorter: sortField('resourcePatternType') },
-        { width: 'auto', title: 'Name', dataIndex: 'resourceName', sorter: sortField('resourceName') },
-        { width: '120px', title: 'Host', dataIndex: 'host', sorter: sortField('host') },
-    ];
+export default observer(({ acl }: AclListProps) => {
+  const resources = flatResourceList(acl);
 
-    return (
-        <>
-            {acl == null ? <Alert type="warning" message="You do not have the necessary permissions to view ACLs" showIcon style={{ marginBottom: '1em' }} /> : null}
-            {!acl?.isAuthorizerEnabled ? <Alert type="warning" message="There's no authorizer configured in your Kafka cluster" showIcon style={{ marginBottom: '1em' }} /> : null}
-            <Table
-                dataSource={resources}
-                columns={columns}
-                pagination={paginationConfig} onChange={onChange}
-                rowKey={(x) => x.eqKey}
-                rowClassName={() => 'pureDisplayRow'}
-            />
-        </>
-    );
+  return (
+    <>
+      {acl == null ? (
+        <Alert status="warning" style={{ marginBottom: '1em' }}>
+          <AlertIcon />
+          You do not have the necessary permissions to view ACLs
+        </Alert>
+      ) : null}
+      {!acl?.isAuthorizerEnabled ? (
+        <Alert status="warning" style={{ marginBottom: '1em' }}>
+          <AlertIcon />
+          There's no authorizer configured in your Kafka cluster
+        </Alert>
+      ) : null}
+      <DataTable<{
+        eqKey: string;
+        principal: string;
+        host: string;
+        operation: AclStrOperation;
+        permissionType: AclStrPermission;
+        resourceType: AclStrResourceType;
+        resourceName: string;
+        resourcePatternType: AclStrResourcePatternType;
+        acls: AclRule[];
+      }>
+        data={resources}
+        pagination
+        sorting
+        columns={[
+          {
+            size: 120,
+            header: 'Resource',
+            accessorKey: 'resourceType',
+          },
+          {
+            size: 120,
+            header: 'Permission',
+            accessorKey: 'permissionType',
+          },
+          {
+            header: 'Principal',
+            accessorKey: 'principal',
+          },
+          {
+            size: 160,
+            header: 'Operation',
+            accessorKey: 'operation',
+          },
+          {
+            header: 'PatternType',
+            accessorKey: 'resourcePatternType',
+          },
+          {
+            header: 'Name',
+            accessorKey: 'resourceName',
+          },
+          {
+            size: 120,
+            header: 'Host',
+            accessorKey: 'host',
+          },
+        ]}
+      />
+    </>
+  );
 });

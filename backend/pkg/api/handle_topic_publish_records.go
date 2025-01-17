@@ -26,6 +26,15 @@ type recordsRequest struct {
 	PartitionID int32 `json:"partitionId"`
 }
 
+const (
+	compressionTypeNone = iota
+	compressionTypeGzip
+	compressionTypeSnappy
+	compressionTypeLz4
+	compressionTypeZstd
+)
+
+// KgoRecordHeaders return the headers request as part of the to be produced Kafka record.
 func (r *recordsRequest) KgoRecordHeaders() []kgo.RecordHeader {
 	if len(r.Headers) == 0 {
 		return nil
@@ -37,6 +46,8 @@ func (r *recordsRequest) KgoRecordHeaders() []kgo.RecordHeader {
 	return kgoRecordHeaders
 }
 
+// KgoRecord returns a kafka-client compatible Kafka record based on the user's request,
+// so that we can produce it.
 func (r *recordsRequest) KgoRecord() kgo.Record {
 	return kgo.Record{
 		Key:       r.Key,
@@ -51,6 +62,8 @@ type recordsRequestHeader struct {
 	Value []byte `json:"value"`
 }
 
+// KgoRecordHeader returns a kafka-client compatible Record Header type based on the requested
+// record headers that shall be produced as part of the Kafka record.
 func (r *recordsRequestHeader) KgoRecordHeader() kgo.RecordHeader {
 	return kgo.RecordHeader{
 		Key:   r.Key,
@@ -86,6 +99,7 @@ func (p *publishRecordsRequest) OK() error {
 	return nil
 }
 
+// KgoRecords returns all kgo.Record that shall be produced.
 func (p *publishRecordsRequest) KgoRecords() []*kgo.Record {
 	kgoRecords := make([]*kgo.Record, 0, len(p.Records)*len(p.TopicNames))
 	for _, topicName := range p.TopicNames {
@@ -110,7 +124,7 @@ func (api *API) handlePublishTopicsRecords() http.HandlerFunc {
 
 		// 2. Check if logged-in user is allowed to publish records to all the specified topics
 		for _, topicName := range req.TopicNames {
-			canPublish, restErr := api.Hooks.Console.CanPublishTopicRecords(r.Context(), topicName)
+			canPublish, restErr := api.Hooks.Authorization.CanPublishTopicRecords(r.Context(), topicName)
 			if restErr != nil {
 				rest.SendRESTError(w, r, api.Logger, restErr)
 				return
@@ -128,8 +142,28 @@ func (api *API) handlePublishTopicsRecords() http.HandlerFunc {
 		}
 
 		// 3. Submit publish topic records request
-		publishRes := api.ConsoleSvc.ProduceRecords(r.Context(), req.KgoRecords(), req.UseTransactions, req.CompressionType)
+		publishRes := api.ConsoleSvc.ProduceRecords(r.Context(), req.KgoRecords(), req.UseTransactions, compressionTypeToKgoCodec(req.CompressionType))
 
 		rest.SendResponse(w, r, api.Logger, http.StatusOK, publishRes)
+	}
+}
+
+// compressionTypeToKgoCodec receives the compressionType as an int8 enum and returns a slice of compression
+// codecs which contains the compression codecs in preference order. It will always return the specified
+// compressionType as highest preference and add "None" as fallback codec.
+func compressionTypeToKgoCodec(compressionType int8) []kgo.CompressionCodec {
+	switch compressionType {
+	case compressionTypeNone:
+		return []kgo.CompressionCodec{kgo.NoCompression()}
+	case compressionTypeGzip:
+		return []kgo.CompressionCodec{kgo.GzipCompression(), kgo.NoCompression()}
+	case compressionTypeSnappy:
+		return []kgo.CompressionCodec{kgo.SnappyCompression(), kgo.NoCompression()}
+	case compressionTypeLz4:
+		return []kgo.CompressionCodec{kgo.Lz4Compression(), kgo.NoCompression()}
+	case compressionTypeZstd:
+		return []kgo.CompressionCodec{kgo.ZstdCompression(), kgo.NoCompression()}
+	default:
+		return []kgo.CompressionCodec{kgo.NoCompression()}
 	}
 }

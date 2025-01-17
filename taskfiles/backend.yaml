@@ -1,0 +1,199 @@
+version: 3
+tasks:
+  install-go:
+    desc: install golang compiler
+    run: once
+    vars:
+      GOLANG_URL_DEFAULT: https://golang.org/dl/go{{.GO_VERSION}}.{{OS}}-{{ARCH}}.tar.gz
+      GOLANG_URL: '{{default .GOLANG_URL_DEFAULT .GOLANG_URL}}'
+    cmds:
+      - rm -rf {{.GO_BUILD_ROOT}}
+      - mkdir -p '{{.GO_BUILD_ROOT}}'
+      - curl -sSLf --retry 3 --retry-connrefused --retry-delay 2 '{{.GOLANG_URL}}' | tar -xz -C '{{.GO_BUILD_ROOT}}' --strip 1
+    status:
+      - test -f '{{.GO_BUILD_ROOT}}/bin/go'
+      - '[[ $({{.GO_BUILD_ROOT}}/bin/go version) == *"go version go{{ .GO_VERSION }}"* ]]'
+
+  install-golangci-lint:
+    desc: install golangci linter
+    vars:
+      GO_LINT_VERSION: 1.60.3
+    cmds:
+      - mkdir -p {{ .BUILD_ROOT}}/bin
+      - curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "{{ .BUILD_ROOT }}"/bin/go v{{ .GO_LINT_VERSION }}
+    status:
+      - '[ -f ''{{ .BUILD_ROOT }}/bin/go'' ] || command -v {{ .BUILD_ROOT }}/bin/go/golangci-lint >/dev/null 2>&1'
+      - '[[ $({{ .BUILD_ROOT }}/bin/go/golangci-lint --version) == *"version {{ .GO_LINT_VERSION }} built"* ]]'
+
+  install-goimports:
+    desc: install goimports
+    vars:
+      GOIMPORTS_VERSION: v0.18.0
+    deps:
+      - install-go
+    cmds:
+      - |
+        {{ .PATH_PREFIX }} go install golang.org/x/tools/cmd/goimports@{{ .GOIMPORTS_VERSION }}
+    status:
+      - '[ -f ''{{ .BUILD_ROOT }}/bin/go'' ] || command -v {{ .BUILD_ROOT }}/bin/go/goimports >/dev/null 2>&1'
+
+  install-gofumpt:
+    vars:
+      GOFUMPT_VERSION: 0.7.0
+    desc: install gofumpt go formater
+    deps:
+      - install-go
+    cmds:
+      - |
+        {{ .PATH_PREFIX }} go install mvdan.cc/gofumpt@v{{ .GOFUMPT_VERSION }}
+    status:
+      - '[ -f ''{{ .BUILD_ROOT }}/bin/go'' ] || command -v {{ .BUILD_ROOT }}/bin/go/gofumpt >/dev/null 2>&1'
+      - '[[ $({{ .BUILD_ROOT }}/bin/go/gofumpt --version) == v{{.GOFUMPT_VERSION}} ]]'
+
+  install-gci:
+    vars:
+      GCI_VERSION: 0.13.4
+    desc: install gci
+    deps:
+      - install-go
+    cmds:
+      - |
+        {{ .PATH_PREFIX }} go install github.com/daixiang0/gci@v{{.GCI_VERSION}}
+    status:
+      - '[[ $({{ .BUILD_ROOT }}/bin/go/gci --version) == v{{.GCI_VERSION}} ]]'
+
+  install-go-licenses:
+    vars:
+      GO_LICENSES_VERSION: 1.6.0
+    desc: install go licenses
+    deps:
+      - install-go
+    cmds:
+      - |
+        {{.PATH_PREFIX}} go install github.com/google/go-licenses@v{{.GO_LICENSES_VERSION}}
+    status:
+      - '[ -f ''{{ .BUILD_ROOT }}/bin/go'' ] || command -v {{ .BUILD_ROOT }}/bin/go/go-licenses >/dev/null 2>&1'
+
+  install-tparse:
+    vars:
+      TPARSE_VERSION: 0.13.2
+    desc: install tparse go test parser
+    deps:
+      - install-go
+    cmds:
+      - |
+        {{ .PATH_PREFIX }} go install github.com/mfridman/tparse@v{{ .TPARSE_VERSION }}
+    status:
+      - '[ -f ''{{ .BUILD_ROOT }}/bin/go'' ] || command -v {{ .BUILD_ROOT }}/bin/go/tparse >/dev/null 2>&1'
+      - '[[ $({{ .BUILD_ROOT }}/bin/go/tparse --version) == tparse version:v{{.TPARSE_VERSION}} ]]'
+
+  install-gomock:
+    vars:
+      GOMOCK_VERSION: 0.4.0
+    desc: install gomock
+    deps:
+      - install-go
+    cmds:
+      - |
+        {{ .PATH_PREFIX }} go install go.uber.org/mock/mockgen@v{{ .GOMOCK_VERSION }}
+    status:
+      - "[ -f '{{ .BUILD_ROOT }}/bin/go' ] || command -v {{ .BUILD_ROOT }}/bin/go/mockgen >/dev/null 2>&1"
+      - "[[ $({{ .BUILD_ROOT }}/bin/go/mockgen --version) == 'v{{.GOMOCK_VERSION}}' ]]"
+
+  install-ifacemaker:
+    vars:
+      IFACEMAKER_VERSION: 1.2.1
+    desc: install ifacemaker
+    deps:
+      - install-go
+    cmds:
+      - |
+        {{ .PATH_PREFIX }} go install github.com/vburenin/ifacemaker@v{{ .IFACEMAKER_VERSION }}
+    status:
+      - "[ -f '{{ .BUILD_ROOT }}/bin/go' ] || command -v {{ .BUILD_ROOT }}/bin/go/ifacemaker >/dev/null 2>&1"
+
+  fmt:
+    desc: Format Go code
+    deps:
+      - install-goimports
+      - install-gci
+      - install-gofumpt
+    dir: "{{.BACKEND_ROOT}}"
+    cmds:
+      - '{{ .BUILD_ROOT }}/bin/go/goimports -l -w -local "github.com/redpanda-data/console/backend" .'
+      - '{{ .BUILD_ROOT }}/bin/go/gofumpt -l -w .'
+      # https://github.com/daixiang0/gci/issues/174
+      # moves "maps" into the wrong place
+      - '{{ .BUILD_ROOT }}/bin/go/gci write -s default -s standard -s ''prefix(github.com/redpanda-data/console/backend)'' .'
+
+  lint:
+    desc: Run Go linters for backend code
+    deps:
+      - install-golangci-lint
+    vars:
+      FIX: '{{ .FIX  | default "" }}'
+    dir: "{{.BACKEND_ROOT}}"
+    cmds:
+      - '{{ .BUILD_ROOT }}/bin/go/golangci-lint run {{ .FIX }} -v --timeout 10m ./...'
+
+  lint-fix:
+    desc: Run Go linters for backend code fixing fixable issues
+    cmds:
+      - task: lint
+        vars:
+          FIX: --fix
+
+  generate:
+    dir: "{{.BACKEND_ROOT}}"
+    desc: Run Go generate
+    deps:
+      - install-gomock
+      - install-ifacemaker
+    cmds:
+      - |
+        {{ .PATH_PREFIX }} go generate ./...
+      - task: ':proto:generate'
+      - task: 'fmt'
+
+  test-unit:
+    dir: "{{.BACKEND_ROOT}}"
+    desc: Run Go unit tests
+    cmds:
+      - |
+        {{ .PATH_PREFIX }} go test ./...
+
+  test-integration:
+    dir: "{{.BACKEND_ROOT}}"
+    desc: Run integration tests
+    cmds:
+      - |
+        {{ .PATH_PREFIX }} go test -v -race --tags=integration -p=1 {{.CLI_ARGS | default "./..." }}
+
+  cover:
+    dir: "{{.BACKEND_ROOT}}"
+    desc: Run integration tests with code coverage
+    deps:
+      - install-tparse
+      - generate
+    cmds:
+      - task: 'lint'
+      - |
+        {{ .PATH_PREFIX }} go test -race --tags=integration -json -cover {{.CLI_ARGS | default "./..." }} | {{ .BUILD_ROOT }}/bin/go/tparse
+
+  verify:
+    dir: "{{.BACKEND_ROOT}}"
+    desc: Run lint and tests
+    cmds:
+      - task: 'lint'
+      - task: 'generate'
+      - task: 'test-integration'
+  licenses:third-party:
+    dir: "{{.BACKEND_ROOT}}"
+    desc: generate third party licenses csv
+    deps:
+      - install-go-licenses
+    cmds:
+      - 'echo "Dependency,License URL,License Type" > ../licenses/third_party_go.csv'
+      - |
+        {{ .PATH_PREFIX }} go-licenses report ./... --ignore github.com/redpanda-data --ignore buf.build/gen >> ../licenses/third_party_go.csv
+

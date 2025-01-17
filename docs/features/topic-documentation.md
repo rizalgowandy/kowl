@@ -5,13 +5,15 @@ path: /docs/features/topic-documentation
 
 # Topic Documentation
 
-If you wish to embed your topic's documentation into the Kowl user interface you can do this by providing access to a git repository which hosts your documentations in Markdown format. In practice this could look like this:
+You can embed your topic's documentation into the Redpanda Console user interface by providing access to a GitHub 
+repository that hosts your documentation files in Markdown format.
 
-![Kowl Topic documentation embedded](../assets/topic-documentation.png)
+![Console Topic documentation embedded](../assets/topic-documentation.png)
 
-## How does it work
+## Integrating topic documentation into Redpanda Console
 
-Kowl clones the provided git repository, recursively iterates through all directories in the repository (up to a max depth of 5) and stores all `.md` files it finds in memory.
+Redpanda Console clones the provided GitHub repository, recursively iterates through all directories in the 
+repository (up to a max depth of 5) and stores all `.md` files it finds in memory. 
 The "Documentation" tab in the frontend will show the markdown of the file matching the name of the Kafka topic.
 
 | Path/Filename        | Kafka Topic Name | Matches            |
@@ -23,26 +25,29 @@ The "Documentation" tab in the frontend will show the markdown of the file match
 
 ## Config
 
-Beside the repository url and branch you usually need to configure authentication credentials so that you can access private repositories. We support SSH as well as basic auth. If neither is specified you could still pull publicly accessible repositories.
+In addition to the repository URL and branch, you usually need to configure authentication credentials so 
+that you can access private repositories. Redpanda Console supports SSH as well as basic auth. 
+If neither is specified you could still pull publicly accessible repositories.
 
-Configuration is described below:
+Following is the configuration:
 
 ```yaml
-owl:
+console:
   topicDocumentation:
     enabled: true
     # Git is where the topic documentation can come from, in the future there might be additional
     git:
       enabled: true
       repository:
-        url: https://github.com/cloudhut/topic-docs
-        branch: master
-      # How often Kowl shall pull the repository to look for new files. Set 0 to disable periodic pulls
+        url: https://github.com/redpanda-data/redpanda-examples
+        branch: main
+        baseDirectory: console/topic-documentation 
+      # How often Console shall pull the repository to look for new files. Set 0 to disable periodic pulls
       refreshInterval: 1m
       # Basic Auth
       # If you want to use GitHub's personal access tokens use `token` as username and pass the token as password
       basicAuth:
-        enabled: true
+        enabled: false
         username: token
         password: #  This can be set via the via the --owl.topic-documentation.git.basic-auth.password flag as well
       # SSH Auth

@@ -16,11 +16,11 @@ import (
 	"sort"
 
 	"github.com/cloudhut/common/rest"
-	"github.com/cloudhut/kowl/backend/pkg/kafka"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kmsg"
-
 	"go.uber.org/zap"
+
+	"github.com/redpanda-data/console/backend/pkg/kafka"
 )
 
 // ConsumerGroupOverview for a Kafka Consumer Group
@@ -130,20 +130,12 @@ func (s *Service) convertKgoGroupDescriptions(describedGroups *kafka.DescribeCon
 				continue
 			}
 
-			members, err := s.convertGroupMembers(d.Members)
-			if err != nil {
-				s.logger.Warn("failed to convert group members from described groups to kowl result type",
-					zap.Error(err),
-					zap.String("group_id", d.Group),
-				)
-				continue
-			}
 			result = append(result, ConsumerGroupOverview{
 				GroupID:       d.Group,
 				State:         d.State,
 				ProtocolType:  d.ProtocolType,
 				Protocol:      d.Protocol,
-				Members:       members,
+				Members:       s.convertGroupMembers(d.Members),
 				CoordinatorID: coordinatorID,
 				TopicOffsets:  offsets[d.Group],
 			})
@@ -153,7 +145,7 @@ func (s *Service) convertKgoGroupDescriptions(describedGroups *kafka.DescribeCon
 	return result
 }
 
-func (s *Service) convertGroupMembers(members []kmsg.DescribeGroupsResponseGroupMember) ([]GroupMemberDescription, error) {
+func (s *Service) convertGroupMembers(members []kmsg.DescribeGroupsResponseGroupMember) []GroupMemberDescription {
 	response := make([]GroupMemberDescription, 0)
 
 	for _, m := range members {
@@ -167,7 +159,7 @@ func (s *Service) convertGroupMembers(members []kmsg.DescribeGroupsResponseGroup
 
 		// Try to decode Group member assignments
 		convertedAssignments := make([]GroupMemberAssignment, 0)
-		memberAssignments := kmsg.GroupMemberAssignment{}
+		memberAssignments := kmsg.ConsumerMemberAssignment{}
 		err := memberAssignments.ReadFrom(m.MemberAssignment)
 		if err != nil {
 			s.logger.Debug("failed to decode member assignments", zap.String("client_id", m.ClientID), zap.Error(err))
@@ -199,5 +191,5 @@ func (s *Service) convertGroupMembers(members []kmsg.DescribeGroupsResponseGroup
 		})
 	}
 
-	return response, nil
+	return response
 }

@@ -13,9 +13,9 @@ import (
 	"net/http"
 
 	"github.com/cloudhut/common/rest"
-	"github.com/cloudhut/kowl/backend/pkg/console"
-	"github.com/go-chi/chi"
 	"go.uber.org/zap"
+
+	"github.com/redpanda-data/console/backend/pkg/console"
 )
 
 // handleGetTopicDocumentation returns the respective topic documentation from the git repository
@@ -26,7 +26,7 @@ func (api *API) handleGetTopicDocumentation() http.HandlerFunc {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		topicName := chi.URLParam(r, "topicName")
+		topicName := rest.GetURLParam(r, "topicName")
 		logger := api.Logger.With(zap.String("topic_name", topicName))
 
 		doc := api.ConsoleSvc.GetTopicDocumentation(topicName)

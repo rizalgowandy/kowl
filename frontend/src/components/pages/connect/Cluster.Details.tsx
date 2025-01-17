@@ -9,182 +9,177 @@
  * by the Apache License, Version 2.0
  */
 
-/* eslint-disable no-useless-escape */
-import { CheckCircleTwoTone, ExclamationCircleTwoTone, WarningTwoTone } from '@ant-design/icons';
-import { Button, message, notification, Popover, Statistic } from 'antd';
-import { motion } from 'framer-motion';
-import { autorun, IReactionDisposer, makeObservable, observable, untracked } from 'mobx';
+import { Box, Button, DataTable, Text } from '@redpanda-data/ui';
+import { makeObservable, observable } from 'mobx';
 import { observer } from 'mobx-react';
-import { CSSProperties } from 'react';
+import { Link } from 'react-router-dom';
+import { isEmbedded } from '../../../config';
 import { appGlobal } from '../../../state/appGlobal';
 import { api } from '../../../state/backendApi';
-import { ApiError } from '../../../state/restInterfaces';
+import type { ClusterAdditionalInfo, ClusterConnectorInfo } from '../../../state/restInterfaces';
 import { uiSettings } from '../../../state/ui';
-import { animProps } from '../../../utils/animationProps';
-import { Code, findPopupContainer } from '../../../utils/tsxUtils';
-import Card from '../../misc/Card';
-import { sortField } from '../../misc/common';
-import { KowlTable } from '../../misc/KowlTable';
-import { PageComponent, PageInitHelper } from '../Page';
-import { ClusterStatisticsCard, ConnectorClass, NotConfigured, removeNamespace, TasksColumn, TaskState } from './helper';
-
+import { DefaultSkeleton } from '../../../utils/tsxUtils';
+import PageContent from '../../misc/PageContent';
+import SearchBar from '../../misc/SearchBar';
+import Section from '../../misc/Section';
+import { PageComponent, type PageInitHelper } from '../Page';
+import { ClusterStatisticsCard, ConnectorClass, NotConfigured, TaskState, TasksColumn } from './helper';
 
 @observer
 class KafkaClusterDetails extends PageComponent<{ clusterName: string }> {
+  @observable placeholder = 5;
+  @observable filteredResults: ClusterConnectorInfo[] = [];
 
-    @observable placeholder = 5;
+  constructor(p: any) {
+    super(p);
+    makeObservable(this);
+  }
 
-    constructor(p: any) {
-        super(p);
-        makeObservable(this);
+  initPage(p: PageInitHelper): void {
+    const clusterName = decodeURIComponent(this.props.clusterName);
+    p.title = clusterName;
+    p.addBreadcrumb('Connectors', '/connect-clusters');
+    p.addBreadcrumb(clusterName, `/connect-clusters/${clusterName}`);
+
+    this.refreshData(true);
+    appGlobal.onRefresh = () => this.refreshData(true);
+  }
+
+  refreshData(force: boolean) {
+    api.refreshConnectClusters(force);
+
+    const clusterName = decodeURIComponent(this.props.clusterName);
+    api.refreshClusterAdditionalInfo(clusterName, force);
+  }
+
+  isFilterMatch(filter: string, item: ClusterConnectorInfo): boolean {
+    try {
+      const quickSearchRegExp = new RegExp(uiSettings.connectorsList.quickSearch, 'i');
+      return Boolean(item.name.match(quickSearchRegExp)) || Boolean(item.class.match(quickSearchRegExp));
+    } catch (e) {
+      console.warn('Invalid expression');
+      return item.name.toLowerCase().includes(filter.toLowerCase());
+    }
+  }
+
+  render() {
+    if (!api.connectConnectors) return DefaultSkeleton;
+
+    const clusterName = decodeURIComponent(this.props.clusterName);
+    if (api.connectConnectors?.isConfigured === false) {
+      return <NotConfigured />;
     }
 
-    initPage(p: PageInitHelper): void {
-        const clusterName = this.props.clusterName;
-        p.title = clusterName;
-        p.addBreadcrumb("Kafka Connect", `/kafka-connect`);
-        p.addBreadcrumb(clusterName, `/kafka-connect/${clusterName}`);
+    const cluster = api.connectConnectors?.clusters?.first((c) => c.clusterName === clusterName);
+    const connectors = cluster?.connectors;
 
-        this.refreshData(false);
-        appGlobal.onRefresh = () => this.refreshData(true);
-    }
+    const additionalInfo = api.connectAdditionalClusterInfo.get(clusterName);
 
-    refreshData(force: boolean) {
-        api.refreshConnectClusters(force);
-        api.refreshClusterAdditionalInfo(this.props.clusterName, force);
-    }
+    return (
+      <PageContent>
+        <ClusterStatisticsCard clusterName={clusterName} />
 
-    render() {
-        const clusterName = this.props.clusterName;
+        {/* Main Card */}
+        <Section>
+          {/* Connectors List */}
+          <div>
+            <div style={{ display: 'flex', marginBottom: '.5em' }}>
+              <Link to={`/connect-clusters/${clusterName}/create-connector`}>
+                <Button variant="solid" colorScheme="brand">
+                  Create connector
+                </Button>
+              </Link>
+            </div>
 
-        if (api.connectConnectors?.isConfigured === false) return <NotConfigured />;
+            <Box my={5}>
+              <SearchBar<ClusterConnectorInfo>
+                placeholderText="Enter search term/regex"
+                dataSource={() => connectors ?? []}
+                isFilterMatch={this.isFilterMatch}
+                filterText={uiSettings.connectorsList.quickSearch}
+                onQueryChanged={(filterText) => (uiSettings.connectorsList.quickSearch = filterText)}
+                onFilteredDataChanged={(data) => {
+                  this.filteredResults = data;
+                }}
+              />
+            </Box>
 
-        const cluster = api.connectConnectors?.clusters?.first(c => c.clusterName == clusterName);
-        const connectors = cluster?.connectors;
+            <DataTable<ClusterConnectorInfo>
+              data={this.filteredResults}
+              pagination
+              defaultPageSize={10}
+              sorting
+              columns={[
+                {
+                  header: 'Connector',
+                  accessorKey: 'name',
+                  cell: ({ row: { original } }) => (
+                    <Link
+                      to={`/connect-clusters/${encodeURIComponent(clusterName)}/${encodeURIComponent(original.name)}`}
+                    >
+                      <Text wordBreak="break-word" whiteSpace="break-spaces">
+                        {original.name}
+                      </Text>
+                    </Link>
+                  ),
+                  size: Number.POSITIVE_INFINITY,
+                },
+                {
+                  header: 'Class',
+                  accessorKey: 'class',
+                  cell: ({ row: { original } }) => <ConnectorClass observable={original} />,
+                },
+                {
+                  header: 'Type',
+                  accessorKey: 'type',
+                  size: 100,
+                },
+                {
+                  header: 'State',
+                  accessorKey: 'state',
+                  size: 120,
+                  cell: ({ row: { original } }) => <TaskState observable={original} />,
+                },
+                {
+                  header: 'Tasks',
+                  size: 120,
+                  cell: ({ row: { original } }) => <TasksColumn observable={original} />,
+                },
+              ]}
+            />
+          </div>
 
-        const additionalInfo = api.connectAdditionalClusterInfo.get(clusterName);
+          {/* Plugin List */}
+          <div style={{ marginTop: '2em', display: isEmbedded() ? 'none' : 'block' }}>
+            <h3 style={{ marginLeft: '0.25em', marginBottom: '0.6em' }}>Connector Types</h3>
 
-        return (
-            <motion.div {...animProps} style={{ margin: '0 1rem' }}>
-                <ClusterStatisticsCard clusterName={clusterName} />
-
-                {/* Main Card */}
-                <Card>
-                    {/* Connectors List */}
-                    <div>
-                        <h3 style={{ marginLeft: '0.25em', marginBottom: '0.6em' }}>
-                            Connectors
-                        </h3>
-                        <KowlTable
-                            key="connectorsList"
-                            dataSource={connectors}
-                            columns={[
-                                {
-                                    title: 'Connector', dataIndex: 'name',
-                                    width: '35%',
-                                    render: (_, r) => (
-                                        <span className='hoverLink' style={{ display: 'inline-block', width: '100%' }}
-                                            onClick={() => appGlobal.history.push(`/kafka-connect/${clusterName}/${r.name}`)}>
-                                            {r.name}
-                                        </span>
-                                    ),
-                                    sorter: sortField('name'), defaultSortOrder: 'ascend'
-                                },
-                                {
-                                    title: 'Class', dataIndex: 'class',
-                                    render: (_, r) => <ConnectorClass observable={r} />,
-                                    sorter: sortField('class')
-                                },
-                                {
-                                    width: 100,
-                                    title: 'Type', dataIndex: 'type',
-                                    className: 'capitalize',
-                                    sorter: sortField('type'),
-                                    filterType: { type: 'enum', optionClassName: 'capitalize' },
-
-                                },
-                                {
-                                    width: 120,
-                                    title: 'State', dataIndex: 'state',
-                                    render: (_, r) => <TaskState observable={r} />,
-                                    sorter: sortField('state'),
-                                    filterType: { type: 'enum', optionClassName: 'capitalize', toDisplay: x => String(x).toLowerCase() },
-
-                                },
-                                {
-                                    width: 120,
-                                    title: 'Tasks', render: (_, c) => <TasksColumn observable={c} />
-                                }
-                            ]}
-                            search={{
-                                searchColumnIndex: 0,
-                                isRowMatch: (row, regex) => regex.test(row.name)
-                                    || regex.test(row.class)
-                                    || regex.test(row.type)
-                                    || regex.test(row.state)
-                            }}
-                            rowKey={r => r.name}
-
-                            observableSettings={uiSettings.kafkaConnect.clusterDetails}
-                            pagination={{
-                                defaultPageSize: 10,
-                            }}
-
-                            className='connectorsTable'
-                        />
-                    </div>
-
-                    {/* Plugin List */}
-                    <div style={{ marginTop: '2em' }}>
-                        <h3 style={{ marginLeft: '0.25em', marginBottom: '0.6em' }}>Plugins</h3>
-
-                        <KowlTable
-                            dataSource={additionalInfo?.plugins}
-                            columns={[
-                                {
-                                    title: 'Class', dataIndex: 'class',
-                                    sorter: sortField('class'),
-                                    render: (v, r) => <ConnectorClass observable={r} />
-                                },
-                                {
-                                    title: 'Version', dataIndex: 'version',
-                                    sorter: sortField('version'),
-                                    filterType: { type: 'enum' },
-                                },
-                                {
-                                    title: 'Type', dataIndex: 'type',
-                                    width: '150px',
-                                    className: 'capitalize',
-                                    sorter: sortField('type'),
-                                    filterType: { type: 'enum', optionClassName: 'capitalize', },
-                                },
-                            ]}
-                            search={{
-                                searchColumnIndex: 0,
-                                isRowMatch: (row, regex) => {
-                                    if (regex.test(row.class)) return true;
-                                    if (row.type && regex.test(row.type)) return true;
-                                    if (row.version && regex.test(row.version)) return true;
-                                    return false;
-                                }
-                            }}
-                            rowKey={r => r.class + r.type + r.version}
-
-                            observableSettings={uiSettings.kafkaConnect.clusterDetailsPlugins}
-                            pagination={{
-                                defaultPageSize: 10,
-                            }}
-
-                            className='pluginsTable'
-                        />
-
-                    </div>
-                </Card>
-            </motion.div>
-        );
-    }
+            <DataTable<ClusterAdditionalInfo['plugins'][0]>
+              data={additionalInfo?.plugins ?? []}
+              pagination
+              sorting
+              columns={[
+                {
+                  header: 'Class',
+                  accessorKey: 'class',
+                  cell: ({ row: { original } }) => <ConnectorClass observable={original} />,
+                  size: 500,
+                },
+                {
+                  header: 'Version',
+                  accessorKey: 'version',
+                  size: 300,
+                },
+                {
+                  header: 'Type',
+                  accessorKey: 'type',
+                },
+              ]}
+            />
+          </div>
+        </Section>
+      </PageContent>
+    );
+  }
 }
 
 export default KafkaClusterDetails;
-
-

@@ -20,17 +20,37 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
+// PutConnectorConfig overwrites an existent connector config.
 func (s *Service) PutConnectorConfig(ctx context.Context, clusterName string, connectorName string, req con.PutConnectorConfigOptions) (con.ConnectorInfo, *rest.Error) {
 	c, restErr := s.getConnectClusterByName(clusterName)
 	if restErr != nil {
 		return con.ConnectorInfo{}, restErr
 	}
 
+	className, ok := req.Config["connector.class"].(string)
+	if !ok || className == "" {
+		return con.ConnectorInfo{}, &rest.Error{
+			Err:      fmt.Errorf("connector class is not set"),
+			Status:   http.StatusBadRequest,
+			Message:  "Connector class is not set",
+			IsSilent: false,
+		}
+	}
+	req.Config = s.Interceptor.ConsoleToKafkaConnect(className, req.Config)
+
 	cInfo, err := c.Client.PutConnectorConfig(ctx, connectorName, req)
+	connectorClass := getMapValueOrString(cInfo.Config, "connector.class", "unknown")
+	cInfo = con.ConnectorInfo{
+		Name:   cInfo.Name,
+		Config: s.Interceptor.KafkaConnectToConsole(connectorClass, cInfo.Config),
+		Tasks:  cInfo.Tasks,
+		Type:   cInfo.Type,
+	}
+
 	if err != nil {
 		return con.ConnectorInfo{}, &rest.Error{
 			Err:          fmt.Errorf("failed to patch connector config: %w", err),
-			Status:       http.StatusOK,
+			Status:       GetStatusCodeFromAPIError(err, http.StatusInternalServerError),
 			Message:      fmt.Sprintf("Failed to patch Connector config: %v", err.Error()),
 			InternalLogs: []zapcore.Field{zap.String("cluster_name", clusterName), zap.String("connector_name", connectorName)},
 			IsSilent:     false,

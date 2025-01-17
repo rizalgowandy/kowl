@@ -9,181 +9,233 @@
  * by the Apache License, Version 2.0
  */
 
-import { EditorProps, Monaco } from '@monaco-editor/react';
-import { Button, Modal, ModalProps as AntdModalProps, Result, Select, Tooltip } from "antd";
-import { action, computed, observable } from "mobx";
-import { Observer, observer } from "mobx-react";
-import React, { Component, ReactElement } from "react";
+import {
+  Box,
+  Button,
+  Flex,
+  Modal,
+  ModalBody,
+  ModalContent,
+  ModalFooter,
+  ModalHeader,
+  ModalOverlay,
+  Result,
+  VStack,
+} from '@redpanda-data/ui';
+import { action, observable } from 'mobx';
+import { observer } from 'mobx-react';
+import React, { type ReactNode, type CSSProperties, type ReactElement } from 'react';
 import { toJson } from './jsonUtils';
-import { Code } from './tsxUtils';
 
-export type AutoModalProps = Omit<AntdModalProps, 'visible' | 'onCancel' | 'onOk' | 'afterClose' | 'modalRender'> & {
-    // skipSuccess?: boolean,
-    successTitle?: string,
+export type AutoModalProps = {
+  title: string;
+  style: CSSProperties;
+  closable: boolean;
+  centered?: boolean;
+  keyboard: boolean;
+  maskClosable: boolean;
+  okText: string;
+  successTitle?: string;
+  onCancel?: (e: React.MouseEvent) => void;
+  onOk?: (e: React.MouseEvent) => void;
+  afterClose?: () => void;
 };
 
 export type AutoModal<TArg> = {
-    show: (arg: TArg) => void;
-    Component: () => JSX.Element;
-}
+  show: (arg: TArg) => void;
+  Component: () => JSX.Element;
+};
 
 // Create a wrapper for <Modal/>  takes care of rendering depending on 'visible'
 // - keeps rendering the modal until its close animation is actually finished
 // - automatically renders content for states like 'Loading' (disable controls etc) or 'Error' (display error and allow trying again)
 export default function createAutoModal<TShowArg, TModalState>(options: {
-    modalProps: AutoModalProps,
-    // called when the returned 'show()' method is called.
-    // Return the state for your modal here
-    onCreate: (arg: TShowArg) => TModalState,
-    // return the component that will handle editting the modal-state (that you returned from 'onCreate')
-    content: (state: TModalState) => React.ReactElement,
-    // called when the user clicks the Ok button; do network requests in here
-    // return some JSX (or null) to show the success page, or throw an error if anything went wrong to show the error page
-    onOk: (state: TModalState) => Promise<JSX.Element | undefined>,
-    // used to determine whether or not the 'ok' button is enabled
-    isOkEnabled?: (state: TModalState) => boolean,
-    // called when 'onOk' has returned (and not thrown an exception)
-    onSuccess?: (state: TModalState, result: any) => void,
-    // called when the user clicks 'Close'. When the user clicks 'Ok', the 'onOk' handler is called, and once it returns (without throwing any errors) the dialog is
-    // considered to be in the 'success' state (where the return of onOk is shown, stuff like "Successfully created XYZ entries"), the only remaining available button is "Close",
-    // and once the user clicks it 'onComplete' will be called.
-    onComplete?: (state: TModalState) => void,
-
+  modalProps: AutoModalProps;
+  // called when the returned 'show()' method is called.
+  // Return the state for your modal here
+  onCreate: (arg: TShowArg) => TModalState;
+  // return the component that will handle editting the modal-state (that you returned from 'onCreate')
+  content: (state: TModalState) => React.ReactElement;
+  // called when the user clicks the Ok button; do network requests in here
+  // return some JSX (or null) to show the success page, or throw an error if anything went wrong to show the error page
+  onOk: (state: TModalState) => Promise<JSX.Element | undefined>;
+  // used to determine whether or not the 'ok' button is enabled
+  isOkEnabled?: (state: TModalState) => boolean;
+  // called when 'onOk' has returned (and not thrown an exception)
+  onSuccess?: (state: TModalState, result: any) => void;
 }): AutoModal<TShowArg> {
+  let userState: TModalState | undefined = undefined;
+  const state = observable<{
+    modalProps: AutoModalProps | null;
+    visible: boolean;
+    loading: boolean;
+    result: null | { error?: any; returnValue?: JSX.Element };
+  }>(
+    {
+      modalProps: null,
+      visible: false,
+      loading: false,
+      result: null,
+    },
+    undefined,
+    { defaultDecorator: observable.ref },
+  );
 
-    let showArg: TShowArg | null = null;
-    let userState: TModalState | undefined = undefined;
-    const state = observable({
-        modalProps: null as AntdModalProps | null,
-        visible: false,
-        loading: false,
-        result: null as null | { error?: any, returnValue?: JSX.Element; },
-    }, undefined, { defaultDecorator: observable.ref });
+  // Called by user to create a new modal instance
+  const show = action((arg: TShowArg) => {
+    userState = options.onCreate(arg);
+    state.modalProps = Object.assign({}, options.modalProps, {
+      onCancel: () => {
+        state.visible = false;
+        state.result = null;
+      },
+      onOk: async () => {
+        if (state.result?.error) {
+          // Error -> Clear
+          state.result = null;
+          return;
+        }
 
-    // Called by user to create a new modal instance
-    const show = action((arg: TShowArg) => {
-        showArg = arg;
-        userState = options.onCreate(arg);
-        state.modalProps = Object.assign({}, options.modalProps, {
-            onCancel: () => {
-                state.visible = false;
-                state.result = null;
-            },
-            onOk: async () => {
-                if (state.result?.error) {
-                    // Error -> Clear
-                    state.result = null;
-                    return;
-                }
+        try {
+          state.loading = true;
+          state.result = {
+            // biome-ignore lint/style/noNonNullAssertion: not touching to avoid breaking code during migration
+            returnValue: (await options.onOk(userState!)) ?? undefined,
+            error: null,
+          };
+        } catch (e) {
+          state.result = { error: e };
+        } finally {
+          state.loading = false;
+        }
 
-                try {
-                    state.loading = true;
-                    state.result = {
-                        returnValue: await options.onOk(userState!) ?? undefined,
-                        error: null,
-                    };
-                } catch (e) {
-                    state.result = { error: e };
-                }
-                finally {
-                    state.loading = false;
-                }
-
-                if (state.result && !state.result.error)
-                    options.onSuccess?.(userState!, state.result.returnValue);
-            },
-            afterClose: () => {
-                showArg = null;
-                state.modalProps = null;
-                state.result = null;
-                state.visible = false;
-                state.loading = false;
-            },
-        });
-        state.visible = true;
+        // biome-ignore lint/style/noNonNullAssertion: not touching to avoid breaking code during migration
+        if (state.result && !state.result.error) options.onSuccess?.(userState!, state.result.returnValue);
+      },
+      afterClose: () => {
+        state.modalProps = null;
+        state.result = null;
+        state.visible = false;
+        state.loading = false;
+      },
     });
+    state.visible = true;
+  });
 
-    const renderError = (err: any) => {
-        let content;
-        let title = 'Error';
-        const codeBoxStyle = { fontSize: '12px', fontFamily: 'monospace', color: 'hsl(0deg 0% 25%)', margin: '0em 1em' };
+  const renderError = (err: any): ReactElement => {
+    let content: ReactNode;
+    let title = 'Error';
+    const codeBoxStyle = { fontSize: '12px', fontFamily: 'monospace', color: 'hsl(0deg 0% 25%)', margin: '0em 1em' };
 
-        if (React.isValidElement(err))
-            // JSX
-            content = err;
-        else if (typeof err === 'string')
-            // String
-            content = <div style={codeBoxStyle}>{err}</div>;
-        else if (err instanceof Error) {
-            // Error
-            title = err.name;
-            content = <div style={codeBoxStyle}>
-                <div style={{ fontSize: '1.1em', fontWeight: 600 }}>{err.name}</div>
-                {err.message}
-            </div>;
-        }
-        else {
-            // Object
-            content = <div style={codeBoxStyle}>
-                {toJson(err, 4)}
-            </div>;
-        }
+    if (React.isValidElement(err))
+      // JSX
+      content = err;
+    else if (typeof err === 'string')
+      // String
+      content = <div style={codeBoxStyle}>{err}</div>;
+    else if (err instanceof Error) {
+      // Error
+      title = err.name;
+      content = <div style={codeBoxStyle}>{err.message}</div>;
+    } else {
+      // Object
+      content = <div style={codeBoxStyle}>{toJson(err, 4)}</div>;
+    }
 
-        return <Result style={{ margin: 0, padding: 0, marginTop: '1em' }} status="error"
-            title={title}
-        >
-            {content}
-        </Result>
-    };
+    return <Result title={title} extra={content} status="error" />;
+  };
 
-    const renderSuccess = (response: JSX.Element | null | undefined) => {
-        const onSuccessClose = () => {
-            state.visible = false;
-            options.onComplete?.(userState!);
-        };
+  const renderSuccess = (response: JSX.Element | null | undefined) => (
+    <Result
+      status="success"
+      title={options.modalProps.successTitle ?? 'Success'}
+      extra={
+        <VStack>
+          <Box>{response}</Box>
+          <Button
+            variant="solid"
+            colorScheme="brand"
+            size="lg"
+            style={{ width: '16rem' }}
+            onClick={() => {
+              state.modalProps?.afterClose?.();
+            }}
+          >
+            Close
+          </Button>
+        </VStack>
+      }
+    />
+  );
 
-        return <>
-            <Result style={{ margin: 0, padding: 0, marginTop: '1em' }} status="success"
-                title={options.modalProps.successTitle ?? "Success"}
-                subTitle={response}
-                extra={<Button type="primary" size='large' style={{ width: '16rem' }} onClick={onSuccessClose}>Close</Button>}
-            />
-        </>;
-    };
+  // The component the user uses to render/mount into the jsx tree
+  const Component = observer(() => {
+    if (!state.modalProps) return <></>;
 
-    // The component the user uses to render/mount into the jsx tree
-    const Component = observer(() => {
-        if (!state.modalProps) return <></>;
+    let content: ReactElement;
 
-        let content: JSX.Element;
-        let isOkEnabled = true;
-        let buttonProps: AntdModalProps;
+    let modalState: 'error' | 'success' | 'normal' = 'normal';
 
-        if (state.result) {
-            if (state.result.error) {
-                // Error
-                content = renderError(state.result.error);
-                buttonProps = propsOnError;
-            } else {
-                // Success
-                content = renderSuccess(state.result.returnValue);
-                buttonProps = propsOnSuccess;
-            }
-        } else {
-            // Normal
-            content = options.content(userState!);
-            isOkEnabled = options.isOkEnabled?.(userState!) ?? true;
-            buttonProps = { okButtonProps: { disabled: !isOkEnabled } };
-        }
+    if (state.result) {
+      if (state.result.error) {
+        // Error
+        modalState = 'error';
+        content = renderError(state.result.error);
+      } else {
+        // Success
+        modalState = 'success';
+        content = renderSuccess(state.result.returnValue);
+      }
+    } else {
+      // Normal
+      modalState = 'normal';
+      // biome-ignore lint/style/noNonNullAssertion: not touching to avoid breaking code during migration
+      content = options.content(userState!);
+    }
 
-        return <Modal {...state.modalProps} {...buttonProps} visible={state.visible} confirmLoading={state.loading}>
-            {content}
-        </Modal>;
-    });
+    return (
+      <Modal
+        isOpen={state.visible}
+        onClose={() => {
+          state.modalProps?.afterClose?.();
+        }}
+      >
+        <ModalOverlay />
+        <ModalContent style={state.modalProps.style}>
+          {modalState !== 'success' && <ModalHeader>{state.modalProps.title}</ModalHeader>}
+          <ModalBody>{content}</ModalBody>
+          {modalState !== 'success' && (
+            <ModalFooter>
+              <Flex gap={2}>
+                {modalState === 'normal' && (
+                  <Button
+                    variant="ghost"
+                    onClick={(e) => {
+                      state.modalProps?.onCancel?.(e);
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                )}
+                <Button
+                  data-testid="onOk-button"
+                  variant="solid"
+                  isLoading={state.loading}
+                  // biome-ignore lint/style/noNonNullAssertion: not touching to avoid breaking code during migration
+                  isDisabled={!options.isOkEnabled?.(userState!)}
+                  onClick={(e) => {
+                    state.modalProps?.onOk?.(e);
+                  }}
+                >
+                  {modalState === 'error' ? 'Back' : state.modalProps.okText}
+                </Button>
+              </Flex>
+            </ModalFooter>
+          )}
+        </ModalContent>
+      </Modal>
+    );
+  });
 
-    return { show, Component };
+  return { show, Component };
 }
-
-const styleHidden = { style: { display: 'none' } };
-const propsOnError = { cancelButtonProps: styleHidden, okText: "Back" } as AntdModalProps;
-const propsOnSuccess = { footer: null, title: null } as AntdModalProps; //  cancelButtonProps: styleHidden, okButtonProps: styleHidden,

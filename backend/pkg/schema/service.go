@@ -10,81 +10,140 @@
 package schema
 
 import (
+	"context"
 	"fmt"
+	"maps"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
 
+	"github.com/hamba/avro/v2"
 	"github.com/jhump/protoreflect/desc"
 	"github.com/jhump/protoreflect/desc/protoparse"
-	"github.com/linkedin/goavro/v2"
+	"github.com/santhosh-tekuri/jsonschema/v5"
+	"github.com/twmb/go-cache/cache"
 	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
+
+	"github.com/redpanda-data/console/backend/pkg/config"
+	"github.com/redpanda-data/console/backend/pkg/schema/embed"
 )
 
 // Service for fetching schemas from a schema registry. It has to provide an interface for other packages which is safe
 // for concurrent access and also takes care of caching schemas.
 type Service struct {
-	cfg          Config
+	cfg          config.Schema
 	logger       *zap.Logger
 	requestGroup singleflight.Group
 
 	registryClient *Client
 
-	// Schema Cache by schema id
-	cacheByID map[uint32]*goavro.Codec
+	// schemaBySubjectVersion caches schema response by subject and version. Caching schemas
+	// by subjects is needed to lookup references in avro schemas.
+	schemaBySubjectVersion *cache.Cache[string, *SchemaVersionedResponse]
+	avroSchemaByID         *cache.Cache[uint32, avro.Schema]
+	jsonSchemaByID         *cache.Cache[uint32, *jsonschema.Schema]
+
+	// for protobuf schema refreshing and compiling
+	srRefreshMutex   sync.RWMutex
+	protoSchemasByID map[int]*SchemaVersionedResponse
+	protoFDByID      map[int]*desc.FileDescriptor
 }
 
 // NewService to access schema registry. Returns an error if connection can't be established.
-func NewService(cfg Config, logger *zap.Logger) (*Service, error) {
+func NewService(cfg config.Schema, logger *zap.Logger) (*Service, error) {
 	client, err := newClient(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create schema registry client: %w", err)
 	}
 
 	return &Service{
-		cfg:            cfg,
-		logger:         logger,
-		requestGroup:   singleflight.Group{},
-		registryClient: client,
-		cacheByID:      make(map[uint32]*goavro.Codec),
+		cfg:                    cfg,
+		logger:                 logger,
+		requestGroup:           singleflight.Group{},
+		registryClient:         client,
+		avroSchemaByID:         cache.New[uint32, avro.Schema](cache.MaxAge(5*time.Minute), cache.MaxErrorAge(time.Second)),
+		schemaBySubjectVersion: cache.New[string, *SchemaVersionedResponse](cache.MaxAge(5*time.Minute), cache.MaxErrorAge(time.Second)),
+		jsonSchemaByID:         cache.New[uint32, *jsonschema.Schema](cache.MaxAge(5*time.Minute), cache.MaxErrorAge(time.Second)),
 	}, nil
 }
 
 // CheckConnectivity to schema registry. Returns no error if connectivity is fine.
-func (s *Service) CheckConnectivity() error {
-	return s.registryClient.CheckConnectivity()
+func (s *Service) CheckConnectivity(ctx context.Context) error {
+	return s.registryClient.CheckConnectivity(ctx)
 }
 
 // GetProtoDescriptors returns all file descriptors in a map where the key is the schema id.
 // The value is a set of file descriptors because each schema may references / imported proto schemas.
-func (s *Service) GetProtoDescriptors() (map[int]*desc.FileDescriptor, error) {
+//
+//nolint:gocognit,cyclop // complicated refresh logic
+func (s *Service) GetProtoDescriptors(ctx context.Context) (map[int]*desc.FileDescriptor, error) {
 	// Singleflight makes sure to not run the function body if there are concurrent requests. We use this to avoid
 	// duplicate requests against the schema registry
 	key := "get-proto-descriptors"
-	v, err, _ := s.requestGroup.Do(key, func() (interface{}, error) {
-		schemasRes, err := s.registryClient.GetSchemas()
-		if err != nil {
-			// If schema registry returns an error we want to retry it next time, so let's forget the key
-			s.requestGroup.Forget(key)
-			return nil, fmt.Errorf("failed to get schema from registry: %w", err)
+	_, err, _ := s.requestGroup.Do(key, func() (any, error) {
+		schemasRes, errs := s.registryClient.GetSchemas(ctx, false)
+		if len(errs) > 0 {
+			for _, err := range errs {
+				s.logger.Error("failed to get schema from registry", zap.Error(err))
+			}
+
+			if len(schemasRes) == 0 {
+				return nil, nil
+			}
 		}
 
-		// 1. Index all returned schemas by their respective subject name and version as stored in the schema registry
-		schemasBySubjectAndVersion := make(map[string]map[int]SchemaVersionedResponse)
+		s.srRefreshMutex.Lock()
+		defer s.srRefreshMutex.Unlock()
+
+		if s.protoSchemasByID == nil {
+			s.protoSchemasByID = make(map[int]*SchemaVersionedResponse, len(schemasRes))
+		}
+
+		// collect existing schema IDs
+		existingSchemaIDs := make(map[int]struct{}, len(s.protoSchemasByID))
+		for id := range s.protoSchemasByID {
+			existingSchemaIDs[id] = struct{}{}
+		}
+
+		schemasToCompile := make([]*SchemaVersionedResponse, 0, len(schemasRes))
+
+		newSchemaIDs := make(map[int]struct{}, len(schemasRes))
+
+		// Index all returned schemas by their respective subject name and version as stored in the schema registry
+		// Collect the new or updated schemas to compile
+		schemasBySubjectAndVersion := make(map[string]map[int]*SchemaVersionedResponse)
 		for _, schema := range schemasRes {
-			if schema.Type != "PROTOBUF" {
+			schema := schema
+
+			if schema.Type != TypeProtobuf {
 				continue
 			}
 			_, exists := schemasBySubjectAndVersion[schema.Subject]
 			if !exists {
-				schemasBySubjectAndVersion[schema.Subject] = make(map[int]SchemaVersionedResponse)
+				schemasBySubjectAndVersion[schema.Subject] = make(map[int]*SchemaVersionedResponse)
 			}
 			schemasBySubjectAndVersion[schema.Subject][schema.Version] = schema
+
+			if existing, ok := s.protoSchemasByID[schema.SchemaID]; !ok || !strings.EqualFold(existing.Schema, schema.Schema) {
+				schemasToCompile = append(schemasToCompile, schema)
+			}
+
+			newSchemaIDs[schema.SchemaID] = struct{}{}
+
+			s.protoSchemasByID[schema.SchemaID] = schema
 		}
 
-		// 2. Compile each subject with each of it's references into one or more filedescriptors so that they can be
+		compileStart := time.Now()
+
+		// 2. Compile each subject with each of it's references into one or more file descriptors so that they can be
 		// registered in their own proto registry.
-		fdBySchemaID := make(map[int]*desc.FileDescriptor)
-		for _, schema := range schemasRes {
-			if schema.Type != "PROTOBUF" {
+		newFDBySchemaID := make(map[int]*desc.FileDescriptor, len(schemasToCompile))
+		for _, schema := range schemasToCompile {
+			schema := schema
+
+			if schema.Type != TypeProtobuf {
 				continue
 			}
 
@@ -96,22 +155,57 @@ func (s *Service) GetProtoDescriptors() (map[int]*desc.FileDescriptor, error) {
 					zap.Error(err))
 				continue
 			}
-			fdBySchemaID[schema.SchemaID] = fd
+			newFDBySchemaID[schema.SchemaID] = fd
 		}
 
-		return fdBySchemaID, nil
+		compileDuration := time.Since(compileStart)
+
+		// merge
+		if s.protoFDByID == nil {
+			s.protoFDByID = make(map[int]*desc.FileDescriptor, len(newFDBySchemaID))
+		}
+
+		maps.Copy(s.protoFDByID, newFDBySchemaID)
+
+		schemasDeleted := 0
+
+		// remove schemas only if no errors
+		if len(errs) == 0 {
+			schemasIDsToDelete := make([]int, 0, len(s.protoSchemasByID)/2)
+
+			for id := range existingSchemaIDs {
+				if _, ok := newSchemaIDs[id]; !ok {
+					schemasIDsToDelete = append(schemasIDsToDelete, id)
+				}
+			}
+
+			for _, id := range schemasIDsToDelete {
+				delete(s.protoSchemasByID, id)
+				delete(s.protoFDByID, id)
+			}
+
+			schemasDeleted = len(schemasIDsToDelete)
+		}
+
+		s.logger.Info("compiled new schemas",
+			zap.Int("updated_schemas", len(schemasToCompile)),
+			zap.Int("deleted_schemas", schemasDeleted),
+			zap.Duration("compile_duration", compileDuration))
+
+		return nil, nil
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	descriptors := v.(map[int]*desc.FileDescriptor)
+	s.srRefreshMutex.RLock()
+	descriptors := maps.Clone(s.protoFDByID)
+	s.srRefreshMutex.RUnlock()
 
 	return descriptors, nil
 }
 
-func (s *Service) addReferences(schema SchemaVersionedResponse, schemaRepository map[string]map[int]SchemaVersionedResponse, schemasByPath map[string]string) error {
-
+func (s *Service) addReferences(schema *SchemaVersionedResponse, schemaRepository map[string]map[int]*SchemaVersionedResponse, schemasByPath map[string]string) error {
 	for _, ref := range schema.References {
 		refSubject, exists := schemaRepository[ref.Subject]
 		if !exists {
@@ -133,7 +227,7 @@ func (s *Service) addReferences(schema SchemaVersionedResponse, schemaRepository
 	return nil
 }
 
-func (s *Service) compileProtoSchemas(schema SchemaVersionedResponse, schemaRepository map[string]map[int]SchemaVersionedResponse) (*desc.FileDescriptor, error) {
+func (s *Service) compileProtoSchemas(schema *SchemaVersionedResponse, schemaRepository map[string]map[int]*SchemaVersionedResponse) (*desc.FileDescriptor, error) {
 	// 1. Let's find the references for each schema and put the references' schemas into our in memory filesystem.
 	schemasByPath := make(map[string]string)
 	schemasByPath[schema.Subject] = schema.Schema
@@ -142,7 +236,22 @@ func (s *Service) compileProtoSchemas(schema SchemaVersionedResponse, schemaRepo
 		return nil, err
 	}
 
-	// 2. Parse schema to descriptor file
+	// 2. Add common proto types
+	// The well known types are automatically added in the protoreflect protoparse package.
+	// But we need to support the other types Redpanda automatically includes.
+	// These are added in the embed package, and here we add them to the map for parsing.
+	commonProtoMap, err := embed.CommonProtoFileMap()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load common protobuf types: %w", err)
+	}
+
+	for commonPath, commonSchema := range commonProtoMap {
+		if _, exists := schemasByPath[commonPath]; !exists {
+			schemasByPath[commonPath] = commonSchema
+		}
+	}
+
+	// 3. Parse schema to descriptor file
 	errorReporter := func(err protoparse.ErrorWithPos) error {
 		position := err.GetPosition()
 		s.logger.Warn("failed to parse proto schema to descriptor",
@@ -156,7 +265,7 @@ func (s *Service) compileProtoSchemas(schema SchemaVersionedResponse, schemaRepo
 		Accessor:              protoparse.FileContentsFromMap(schemasByPath),
 		InferImportPaths:      true,
 		ValidateUnlinkedFiles: true,
-		IncludeSourceCodeInfo: true,
+		IncludeSourceCodeInfo: false,
 		ErrorReporter:         errorReporter,
 	}
 	descriptors, err := parser.ParseFiles(schema.Subject)
@@ -166,67 +275,304 @@ func (s *Service) compileProtoSchemas(schema SchemaVersionedResponse, schemaRepo
 	return descriptors[0], nil
 }
 
-func (s *Service) GetAvroSchemaByID(schemaID uint32) (*goavro.Codec, error) {
-	// Singleflight makes sure to not run the function body if there are concurrent requests. We use this to avoid
-	// duplicate requests against the schema registry
-	key := fmt.Sprintf("get-avro-schema-%d", schemaID)
-	v, err, _ := s.requestGroup.Do(key, func() (interface{}, error) {
-		if codec, exists := s.cacheByID[schemaID]; exists {
-			return codec, nil
-		}
+// IsEnabled returns whether the schema registry is enabled in configuration.
+func (s *Service) IsEnabled() bool {
+	return s.cfg.Enabled
+}
 
-		schemaRes, err := s.registryClient.GetSchemaByID(schemaID)
+// GetAvroSchemaByID loads the schema by the given schemaID and tries to parse the schema
+// contents to an avro.Schema, so that it can be used for decoding Avro encoded messages.
+func (s *Service) GetAvroSchemaByID(ctx context.Context, schemaID uint32) (avro.Schema, error) {
+	codecCached, err, _ := s.avroSchemaByID.Get(schemaID, func() (avro.Schema, error) {
+		schemaRes, err := s.registryClient.GetSchemaByID(ctx, schemaID)
 		if err != nil {
-			// If schema registry returns an error we want to retry it next time, so let's forget the key
-			s.requestGroup.Forget(key)
+			s.logger.Warn("failed to fetch avro schema", zap.Uint32("schema_id", schemaID), zap.Error(err))
 			return nil, fmt.Errorf("failed to get schema from registry: %w", err)
 		}
 
-		codec, err := goavro.NewCodec(schemaRes.Schema)
+		codec, err := s.ParseAvroSchemaWithReferences(ctx, schemaRes, avro.DefaultSchemaCache)
 		if err != nil {
-			// If codec compilation returns an error we want to retry it next time (maybe the schema has changed or response
-			// was corrupted), so let's forget the key
-			s.requestGroup.Forget(key)
-			return nil, fmt.Errorf("failed to create codec from schema string: %w", err)
+			return nil, fmt.Errorf("failed to parse schema: %w", err)
 		}
-
-		s.cacheByID[schemaID] = codec
 
 		return codec, nil
 	})
-	if err != nil {
-		return nil, err
+
+	return codecCached, err
+}
+
+// GetSubjects returns a list of all deployed schemas.
+func (s *Service) GetSubjects(ctx context.Context, showSoftDeleted bool) (*SubjectsResponse, error) {
+	return s.registryClient.GetSubjects(ctx, showSoftDeleted)
+}
+
+// GetSchemaTypes returns supported types (AVRO, PROTOBUF, JSON)
+func (s *Service) GetSchemaTypes(ctx context.Context) ([]string, error) {
+	return s.registryClient.GetSchemaTypes(ctx)
+}
+
+// GetSubjectVersions returns a schema subject's registered versions.
+func (s *Service) GetSubjectVersions(ctx context.Context, subject string, showSoftDeleted bool) (*SubjectVersionsResponse, error) {
+	return s.registryClient.GetSubjectVersions(ctx, subject, showSoftDeleted)
+}
+
+// GetSchemaBySubject returns the schema for the specified version of this subject.
+func (s *Service) GetSchemaBySubject(ctx context.Context, subject, version string, showSoftDeleted bool) (*SchemaVersionedResponse, error) {
+	return s.registryClient.GetSchemaBySubject(ctx, subject, version, showSoftDeleted)
+}
+
+// GetMode returns the current mode for Schema Registry at a global level.
+func (s *Service) GetMode(ctx context.Context) (*ModeResponse, error) {
+	return s.registryClient.GetMode(ctx)
+}
+
+// GetConfig gets global compatibility level.
+func (s *Service) GetConfig(ctx context.Context) (*ConfigResponse, error) {
+	return s.registryClient.GetConfig(ctx)
+}
+
+// PutConfig sets the global compatibility level.
+func (s *Service) PutConfig(ctx context.Context, compatLevel CompatibilityLevel) (*PutConfigResponse, error) {
+	return s.registryClient.PutConfig(ctx, compatLevel)
+}
+
+// GetSubjectConfig gets compatibility level for a given subject.
+func (s *Service) GetSubjectConfig(ctx context.Context, subject string) (*ConfigResponse, error) {
+	return s.registryClient.GetSubjectConfig(ctx, subject)
+}
+
+// PutSubjectConfig puts compatibility level for a given subject.
+func (s *Service) PutSubjectConfig(ctx context.Context, subject string, compatLevel CompatibilityLevel) (*PutConfigResponse, error) {
+	return s.registryClient.PutSubjectConfig(ctx, subject, compatLevel)
+}
+
+// DeleteSubjectConfig puts compatibility level for a given subject.
+func (s *Service) DeleteSubjectConfig(ctx context.Context, subject string) (*ConfigResponse, error) {
+	return s.registryClient.DeleteSubjectConfig(ctx, subject)
+}
+
+// DeleteSubject deletes a schema registry subject.
+func (s *Service) DeleteSubject(ctx context.Context, subject string, deletePermanently bool) (*DeleteSubjectResponse, error) {
+	return s.registryClient.DeleteSubject(ctx, subject, deletePermanently)
+}
+
+// DeleteSubjectVersion deletes a specific version for a schema registry subject.
+func (s *Service) DeleteSubjectVersion(ctx context.Context, subject, version string, deletePermanently bool) (*DeleteSubjectVersionResponse, error) {
+	return s.registryClient.DeleteSubjectVersion(ctx, subject, version, deletePermanently)
+}
+
+// GetSchemaReferences returns all schema ids that references the input
+// subject-version. You can use -1 or 'latest' to check the latest version.
+func (s *Service) GetSchemaReferences(ctx context.Context, subject, version string) (*GetSchemaReferencesResponse, error) {
+	return s.registryClient.GetSchemaReferences(ctx, subject, version)
+}
+
+// CheckCompatibility checks if a schema is compatible with the given version
+// that exists. You can use 'latest' to check compatibility with the latest version.
+func (s *Service) CheckCompatibility(ctx context.Context, subject string, version string, schema Schema) (*CheckCompatibilityResponse, error) {
+	return s.registryClient.CheckCompatibility(ctx, subject, version, schema)
+}
+
+// GetSchemaByID gets the schema by ID.
+func (s *Service) GetSchemaByID(ctx context.Context, id uint32) (*SchemaResponse, error) {
+	return s.registryClient.GetSchemaByID(ctx, id)
+}
+
+// ParseAvroSchemaWithReferences parses an avro schema that potentially has references
+// to other schemas. References will be resolved by requesting and parsing them
+// recursively. If any of the referenced schemas can't be fetched or parsed an
+// error will be returned.
+func (s *Service) ParseAvroSchemaWithReferences(ctx context.Context, schema *SchemaResponse, schemaCache *avro.SchemaCache) (avro.Schema, error) {
+	if len(schema.References) == 0 {
+		return avro.Parse(schema.Schema)
 	}
 
-	codec := v.(*goavro.Codec)
+	// Fetch and parse all schema references recursively. All schemas that have
+	// been parsed successfully will be cached by the avro library.
+	for _, reference := range schema.References {
+		schemaRef, err := s.GetSchemaBySubjectAndVersion(ctx, reference.Subject, strconv.Itoa(reference.Version))
+		if err != nil {
+			return nil, err
+		}
 
-	return codec, nil
+		if _, err := s.ParseAvroSchemaWithReferences(
+			ctx,
+			&SchemaResponse{
+				Schema:     schemaRef.Schema,
+				References: schemaRef.References,
+			},
+			schemaCache,
+		); err != nil {
+			return nil, fmt.Errorf(
+				"failed to parse schema reference (subject: %q, version %d): %w",
+				reference.Subject, reference.Version, err,
+			)
+		}
+	}
+
+	// Parse the main schema in the end after solving all references
+	return avro.Parse(schema.Schema)
 }
 
-func (s *Service) GetSubjects() (*SubjectsResponse, error) {
-	return s.registryClient.GetSubjects()
+// ValidateAvroSchema tries to parse the given avro schema with the avro library.
+// If there's an issue with the given schema, it will be returned to the user
+// so that they can fix the schema string.
+func (s *Service) ValidateAvroSchema(ctx context.Context, sch Schema) error {
+	tempCache := avro.SchemaCache{}
+	schemaRes := &SchemaResponse{Schema: sch.Schema, References: sch.References}
+	_, err := s.ParseAvroSchemaWithReferences(ctx, schemaRes, &tempCache)
+	return err
 }
 
-func (s *Service) GetSchemaTypes() ([]string, error) {
-	return s.registryClient.GetSchemaTypes()
+// ValidateJSONSchema validates a JSON schema for syntax issues.
+func (s *Service) ValidateJSONSchema(ctx context.Context, name string, sch Schema, schemaCompiler *jsonschema.Compiler) error {
+	if schemaCompiler == nil {
+		schemaCompiler = jsonschema.NewCompiler()
+	}
+
+	for _, ref := range sch.References {
+		schemaRefRes, err := s.GetSchemaBySubjectAndVersion(ctx, ref.Subject, strconv.Itoa(ref.Version))
+		if err != nil {
+			return fmt.Errorf("failed to retrieve reference %q: %w", ref.Subject, err)
+		}
+		schemaRef := Schema{
+			Schema:     schemaRefRes.Schema,
+			Type:       schemaRefRes.Type,
+			References: nil,
+		}
+		if err := s.ValidateJSONSchema(ctx, ref.Name, schemaRef, schemaCompiler); err != nil {
+			return err
+		}
+	}
+
+	// Prevent a panic by the schema compiler by checking the name before AddResource
+	if strings.IndexByte(name, '#') != -1 {
+		return fmt.Errorf("hashtags are not allowed as part of the schema name")
+	}
+	err := schemaCompiler.AddResource(name, strings.NewReader(sch.Schema))
+	if err != nil {
+		return fmt.Errorf("failed to add resource for %q", name)
+	}
+
+	_, err = jsonschema.CompileString(name, sch.Schema)
+	if err != nil {
+		return fmt.Errorf("failed to validate schema %q: %w", name, err)
+	}
+	return nil
 }
 
-func (s *Service) GetSubjectVersions(subject string) (*SubjectVersionsResponse, error) {
-	return s.registryClient.GetSubjectVersions(subject)
+// ValidateProtobufSchema validates a given protobuf schema by trying to parse it as a descriptor
+// along with all its references.
+func (s *Service) ValidateProtobufSchema(ctx context.Context, name string, sch Schema) error {
+	schemasByPath := make(map[string]string)
+	schemasByPath[name] = sch.Schema
+
+	for _, ref := range sch.References {
+		schemaRefRes, err := s.GetSchemaBySubjectAndVersion(ctx, ref.Subject, strconv.Itoa(ref.Version))
+		if err != nil {
+			return fmt.Errorf("failed to retrieve reference %q: %w", ref.Subject, err)
+		}
+		schemasByPath[ref.Name] = schemaRefRes.Schema
+	}
+
+	// Add common proto types
+	// The well known types are automatically added in the protoreflect protoparse package.
+	// But we need to support the other types Redpanda automatically includes.
+	// These are added in the embed package, and here we add them to the map for parsing.
+	commonProtoMap, err := embed.CommonProtoFileMap()
+	if err != nil {
+		return fmt.Errorf("failed to load common protobuf types: %w", err)
+	}
+
+	for commonPath, commonSchema := range commonProtoMap {
+		if _, exists := schemasByPath[commonPath]; !exists {
+			schemasByPath[commonPath] = commonSchema
+		}
+	}
+
+	parser := protoparse.Parser{
+		Accessor:              protoparse.FileContentsFromMap(schemasByPath),
+		InferImportPaths:      true,
+		ValidateUnlinkedFiles: true,
+		IncludeSourceCodeInfo: false,
+	}
+
+	_, err = parser.ParseFiles(name)
+
+	return err
 }
 
-func (s *Service) GetSchemaBySubject(subject string, version string) (*SchemaVersionedResponse, error) {
-	return s.registryClient.GetSchemaBySubject(subject, version)
+// GetSchemaBySubjectAndVersion retrieves a schema from the schema registry
+// by a given <subject, version> tuple.
+func (s *Service) GetSchemaBySubjectAndVersion(ctx context.Context, subject string, version string) (*SchemaVersionedResponse, error) {
+	cacheKey := subject + "v" + version
+	cachedSchema, err, _ := s.schemaBySubjectVersion.Get(cacheKey, func() (*SchemaVersionedResponse, error) {
+		schema, err := s.registryClient.GetSchemaBySubject(ctx, subject, version, false)
+		if err != nil {
+			return nil, fmt.Errorf("get schema by subject failed: %w", err)
+		}
+
+		return schema, nil
+	})
+
+	return cachedSchema, err
 }
 
-func (s *Service) GetMode() (*ModeResponse, error) {
-	return s.registryClient.GetMode()
+// CreateSchema registers a new schema for the given subject.
+func (s *Service) CreateSchema(ctx context.Context, subject string, schema Schema) (*CreateSchemaResponse, error) {
+	return s.registryClient.CreateSchema(ctx, subject, schema)
 }
 
-func (s *Service) GetConfig() (*ConfigResponse, error) {
-	return s.registryClient.GetConfig()
+// GetSchemaUsagesByID returns all usages of a given schema ID. A single schema
+// can be reused in multiple subject versions.
+func (s *Service) GetSchemaUsagesByID(ctx context.Context, schemaID int) ([]SubjectVersion, error) {
+	return s.registryClient.GetSchemaUsagesByID(ctx, schemaID)
 }
 
-func (s *Service) GetSubjectConfig(subject string) (*ConfigResponse, error) {
-	return s.registryClient.GetSubjectConfig(subject)
+// GetJSONSchemaByID loads the schema by the given schemaID and tries to parse the schema
+// contents to an jsonschema.Schema, so that it can be used for decoding JSON Schema encoded messages.
+func (s *Service) GetJSONSchemaByID(ctx context.Context, schemaID uint32) (*jsonschema.Schema, error) {
+	cached, err, _ := s.jsonSchemaByID.Get(schemaID, func() (*jsonschema.Schema, error) {
+		schemaRes, err := s.registryClient.GetSchemaByID(ctx, schemaID)
+		if err != nil {
+			s.logger.Warn("failed to fetch JSON schema", zap.Uint32("schema_id", schemaID), zap.Error(err))
+			return nil, fmt.Errorf("failed to get schema from registry: %w", err)
+		}
+
+		c := jsonschema.NewCompiler()
+		schemaName := "redpanda_jsonschema.json"
+
+		err = s.buildJSONSchemaWithReferences(ctx, c, schemaName, schemaRes)
+		if err != nil {
+			return nil, err
+		}
+
+		return c.Compile(schemaName)
+	})
+
+	return cached, err
+}
+
+func (s *Service) buildJSONSchemaWithReferences(ctx context.Context, compiler *jsonschema.Compiler, name string, schemaRes *SchemaResponse) error {
+	if err := compiler.AddResource(name, strings.NewReader(schemaRes.Schema)); err != nil {
+		return err
+	}
+
+	for _, reference := range schemaRes.References {
+		schemaRef, err := s.GetSchemaBySubjectAndVersion(ctx, reference.Subject, strconv.Itoa(reference.Version))
+		if err != nil {
+			return err
+		}
+		if err := compiler.AddResource(reference.Name, strings.NewReader(schemaRef.Schema)); err != nil {
+			return err
+		}
+		if err := s.buildJSONSchemaWithReferences(ctx, compiler, reference.Name, &SchemaResponse{
+			Schema:     schemaRef.Schema,
+			References: schemaRef.References,
+		}); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

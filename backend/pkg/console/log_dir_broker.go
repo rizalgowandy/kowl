@@ -16,6 +16,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
+// LogDirsByBroker is broker aggregated view for Kafka log dir information.
 type LogDirsByBroker struct {
 	BrokerMeta kgo.BrokerMetadata `json:"brokerMetadata"`
 	Error      error              `json:"error"`
@@ -28,6 +29,8 @@ type LogDirsByBroker struct {
 	PartitionCount int   `json:"partitionCount"`
 }
 
+// LogDir describes a directory (usually a disk drive on a broker) that stores
+// partition log files (Kafka data).
 type LogDir struct {
 	Error          error         `json:"error"`
 	AbsolutePath   string        `json:"absolutePath"`
@@ -36,12 +39,14 @@ type LogDir struct {
 	PartitionCount int           `json:"partitionCount"`
 }
 
+// LogDirTopic is the aggregated view for a Kafka topic.
 type LogDirTopic struct {
 	TopicName      string            `json:"topicName"`
 	TotalSizeBytes int64             `json:"totalSizeBytes"`
 	Partitions     []LogDirPartition `json:"partitions"`
 }
 
+// LogDirPartition is the log dir information for a single partition.
 type LogDirPartition struct {
 	PartitionID int32 `json:"partitionId"`
 	OffsetLag   int64 `json:"offsetLag"`
@@ -50,7 +55,7 @@ type LogDirPartition struct {
 
 // LogDirSizeByBroker returns a map where the BrokerID is the key and the summed bytes of all log dirs of
 // the respective broker is the value.
-func (s *Service) logDirsByBroker(ctx context.Context) (map[int32]LogDirsByBroker, error) {
+func (s *Service) logDirsByBroker(ctx context.Context) map[int32]LogDirsByBroker {
 	// 1. Describe log dirs for all topics, so that we can sum the size per broker
 	responses := s.kafkaSvc.DescribeLogDirs(ctx, nil)
 
@@ -111,5 +116,5 @@ func (s *Service) logDirsByBroker(ctx context.Context) (map[int32]LogDirsByBroke
 		result[response.BrokerMetadata.NodeID] = brokerLogDirs
 	}
 
-	return result, nil
+	return result
 }

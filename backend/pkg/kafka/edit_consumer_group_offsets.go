@@ -12,6 +12,7 @@ package kafka
 import (
 	"context"
 	"fmt"
+
 	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
@@ -29,6 +30,9 @@ func (s *Service) EditConsumerGroupOffsets(ctx context.Context, groupID string, 
 	return res, nil
 }
 
+// DeleteConsumerGroupOffsets deletes one or more topic offsets of a single consumer group. Usually consumer groups
+// without any remaining group offsets are considered deleted. If you want to ensure a consumer group is deleted,
+// use the DeleteConsumerGroup method.
 func (s *Service) DeleteConsumerGroupOffsets(ctx context.Context, groupID string, topics []kmsg.OffsetDeleteRequestTopic) (*kmsg.OffsetDeleteResponse, error) {
 	req := kmsg.NewOffsetDeleteRequest()
 	req.Group = groupID

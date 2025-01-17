@@ -11,23 +11,31 @@ package console
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kmsg"
-
 	"go.uber.org/zap"
 )
 
+// DocumentationState denotes whether topic documentation is available for a certain
+// topic. If it is not available it also provides additional information why it's not available.
 type DocumentationState string
 
 const (
-	DocumentationStateUnknown       DocumentationState = "UNKNOWN"
-	DocumentationStateNotConfigured                    = "NOT_CONFIGURED"
-	DocumentationStateNotExistent                      = "NOT_EXISTENT"
-	DocumentationStateAvailable                        = "AVAILABLE"
+	// DocumentationStateUnknown is the default documentation state.
+	DocumentationStateUnknown DocumentationState = "UNKNOWN"
+	// DocumentationStateNotConfigured is the state if Redpanda Console was not configured to
+	// run with topic documentations (i.e. it has no source to pull documentations from).
+	DocumentationStateNotConfigured = "NOT_CONFIGURED"
+	// DocumentationStateNotExistent denotes that topic documentation is configured, but
+	// for this specific topic there's no documentation available.
+	DocumentationStateNotExistent = "NOT_EXISTENT"
+	// DocumentationStateAvailable denotes that documentation for this topic is available.
+	DocumentationStateAvailable = "AVAILABLE"
 )
 
 // TopicSummary is all information we get when listing Kafka topics
@@ -47,7 +55,7 @@ type TopicSummary struct {
 // GetTopicsOverview returns a TopicSummary for all Kafka Topics
 func (s *Service) GetTopicsOverview(ctx context.Context) ([]*TopicSummary, error) {
 	// 1. Request metadata
-	metadata, err := s.kafkaSvc.GetMetadata(ctx, nil)
+	metadata, err := s.kafkaSvc.GetMetadataTopics(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -64,8 +72,10 @@ func (s *Service) GetTopicsOverview(ctx context.Context) ([]*TopicSummary, error
 	defer cancel()
 
 	configs := make(map[string]*TopicConfig)
+	var logDirsByTopic map[string]TopicLogDirSummary
+	var logDirErrorMsg string
 	wg := sync.WaitGroup{}
-	wg.Add(1)
+	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		configs, err = s.GetTopicsConfigs(childCtx, topicNames, []string{"cleanup.policy"})
@@ -73,7 +83,16 @@ func (s *Service) GetTopicsOverview(ctx context.Context) ([]*TopicSummary, error
 			s.logger.Warn("failed to fetch topic configs to return cleanup.policy", zap.Error(err))
 		}
 	}()
-	logDirsByTopic := s.logDirsByTopic(childCtx, metadata)
+	go func() {
+		defer wg.Done()
+		logDirs, err := s.logDirsByTopic(childCtx)
+		if err == nil {
+			logDirsByTopic = logDirs
+		} else {
+			s.logger.Warn("failed to retrieve log dirs by topic", zap.Error(err))
+			logDirErrorMsg = err.Error()
+		}
+	}()
 	wg.Wait()
 
 	// 4. Merge information from all requests and construct the TopicSummary object
@@ -93,13 +112,27 @@ func (s *Service) GetTopicsOverview(ctx context.Context) ([]*TopicSummary, error
 		}
 
 		docs := s.GetTopicDocumentation(topicName)
-		docState := DocumentationStateUnknown
+		var docState DocumentationState
 		if !docs.IsEnabled {
 			docState = DocumentationStateNotConfigured
-		} else if docs.Markdown == nil {
-			docState = DocumentationStateNotExistent
 		} else {
-			docState = DocumentationStateAvailable
+			if docs.Markdown == nil {
+				docState = DocumentationStateNotExistent
+			} else {
+				docState = DocumentationStateAvailable
+			}
+		}
+
+		// Set dummy response in case of an error when describing metadata or log dirs
+		// If we have a topic log dir summary for the given topic we will return that.
+		logDirSummary := TopicLogDirSummary{
+			TotalSizeBytes: -1,
+			Hint:           fmt.Sprintf("Failed to describe log dirs: %v", logDirErrorMsg),
+		}
+		if logDirsByTopic != nil {
+			if sum, exists := logDirsByTopic[topicName]; exists {
+				logDirSummary = sum
+			}
 		}
 
 		res[i] = &TopicSummary{
@@ -108,7 +141,7 @@ func (s *Service) GetTopicsOverview(ctx context.Context) ([]*TopicSummary, error
 			PartitionCount:    len(topic.Partitions),
 			ReplicationFactor: len(topic.Partitions[0].Replicas),
 			CleanupPolicy:     policy,
-			LogDirSummary:     logDirsByTopic[topicName],
+			LogDirSummary:     logDirSummary,
 			Documentation:     docState,
 		}
 	}
@@ -126,7 +159,7 @@ func (s *Service) GetTopicsOverview(ctx context.Context) ([]*TopicSummary, error
 func (s *Service) GetAllTopicNames(ctx context.Context, metadata *kmsg.MetadataResponse) ([]string, error) {
 	if metadata == nil {
 		var err error
-		metadata, err = s.kafkaSvc.GetMetadata(ctx, nil)
+		metadata, err = s.kafkaSvc.GetMetadataTopics(ctx, nil)
 		if err != nil {
 			return nil, err
 		}

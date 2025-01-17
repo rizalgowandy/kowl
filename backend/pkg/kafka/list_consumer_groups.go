@@ -17,12 +17,16 @@ import (
 	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
+// ListConsumerGroupsResponseSharded is a helper type with additional helper functions and it carries
+// the sum of all response shards.
 type ListConsumerGroupsResponseSharded struct {
 	Groups         []ListConsumerGroupsResponse
 	RequestsSent   int
 	RequestsFailed int
 }
 
+// GetGroupIDs returns all consumer group ids that can be found in any of the list consumer
+// group response shards.
 func (l *ListConsumerGroupsResponseSharded) GetGroupIDs() []string {
 	groupIDs := make([]string, 0)
 	for _, groupResp := range l.Groups {
@@ -36,7 +40,7 @@ func (l *ListConsumerGroupsResponseSharded) GetGroupIDs() []string {
 	return groupIDs
 }
 
-// LogDirResponse can have an error (if the broker failed to return data) or the actual LogDir response
+// ListConsumerGroupsResponse is a single broker's response for listing consumer groups.
 type ListConsumerGroupsResponse struct {
 	BrokerMetadata kgo.BrokerMetadata
 	Groups         *kmsg.ListGroupsResponse
@@ -62,9 +66,11 @@ func (s *Service) ListConsumerGroups(ctx context.Context) (*ListConsumerGroupsRe
 			lastErr = kresp.Err
 		}
 
-		// Important: If we don't declare the second parameter, telling us if the cast succeeded,
-		// we'll get a panic when the cast fails, instead of being able to continue.
-		res, _ := kresp.Resp.(*kmsg.ListGroupsResponse)
+		res, ok := kresp.Resp.(*kmsg.ListGroupsResponse)
+		if !ok {
+			// This should never happen, but we want to catch it to avoid panics
+			return nil, fmt.Errorf("failed to assert ListGroupsResponse")
+		}
 
 		result.Groups = append(result.Groups, ListConsumerGroupsResponse{
 			BrokerMetadata: kresp.Meta,

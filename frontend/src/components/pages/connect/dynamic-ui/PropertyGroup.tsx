@@ -9,51 +9,105 @@
  * by the Apache License, Version 2.0
  */
 
-/* eslint-disable no-useless-escape */
-import { Collapse } from 'antd';
+import { Accordion, Box, Divider, Flex, Heading, Link, Text } from '@redpanda-data/ui';
 import { observer } from 'mobx-react';
-import { PropertyGroup } from './components';
+import type { PropertyGroup } from '../../../../state/connect/state';
 import { PropertyComponent } from './PropertyComponent';
+import { TopicInput } from './forms/TopicInput';
 
-export const PropertyGroupComponent = observer((props: { group: PropertyGroup, allGroups: PropertyGroup[] }) => {
+const topicsFields = ['topics', 'topics.regex'];
+
+export const PropertyGroupComponent = observer(
+  (props: {
+    group: PropertyGroup;
+    allGroups: PropertyGroup[];
+    showAdvancedOptions: boolean;
+    connectorType: 'sink' | 'source';
+  }) => {
     const g = props.group;
 
-    if (g.groupName == "Transforms") {
-        // Transforms + its sub groups
+    const filteredProperties = g.filteredProperties;
 
-        const subGroups = props.allGroups
-            .filter(g => g.groupName.startsWith("Transforms: "))
-            .sort((a, b) => props.allGroups.indexOf(a) - props.allGroups.indexOf(b));
+    if (filteredProperties.length === 0) return null;
 
-        return <div className='dynamicInputs'>
-            {g.properties.map(p => <PropertyComponent key={p.name} property={p} />)}
+    if (g.group.name === 'Transforms') {
+      // Transforms + its sub groups
+      const subGroups = props.allGroups
+        .filter((g) => g.group.name?.startsWith('Transforms: '))
+        .sort((a, b) => props.allGroups.indexOf(a) - props.allGroups.indexOf(b));
 
-            <div style={{ gridColumn: 'span 4', paddingLeft: '8px' }}>
+      return (
+        <div className="dynamicInputs">
+          {filteredProperties.map((p) => (
+            <PropertyComponent key={p.name} property={p} />
+          ))}
 
-                <Collapse ghost bordered={false}>
-                    {subGroups.map(subGroup =>
-                        <Collapse.Panel
-                            className={(subGroup.propertiesWithErrors.length > 0) ? 'hasErrors' : ''}
-                            key={subGroup.groupName}
-                            header={<div style={{ display: 'flex', alignItems: 'center', gap: '1em' }}>
-                                <span style={{ fontSize: '1.1em', fontWeight: 600, fontFamily: 'Open Sans' }}>{subGroup.groupName}</span>
-                                <span className='issuesTag'>{subGroup.propertiesWithErrors.length} issues</span>
-                            </div>}
-                        >
-                            <PropertyGroupComponent group={subGroup} allGroups={props.allGroups} />
-                        </Collapse.Panel>
-                    )}
-                </Collapse>
-
-            </div>
+          <div style={{ gridColumn: 'span 4', paddingLeft: '8px' }}>
+            <Accordion
+              items={subGroups.map((subGroup) => ({
+                heading: (
+                  <Flex alignItems="center" gap={4}>
+                    <span style={{ fontSize: '1.1em', fontWeight: 600, fontFamily: 'Open Sans' }}>
+                      {subGroup.group.name}
+                    </span>
+                    <span style={{ fontSize: '1.1em', fontWeight: 600, fontFamily: 'Open Sans' }}>
+                      {subGroup.group.name}
+                    </span>
+                    <span className="issuesTag">{subGroup.propertiesWithErrors.length} issues</span>
+                  </Flex>
+                ),
+                description: (
+                  <PropertyGroupComponent
+                    group={subGroup}
+                    allGroups={props.allGroups}
+                    showAdvancedOptions={props.showAdvancedOptions}
+                    connectorType={props.connectorType}
+                  />
+                ),
+              }))}
+            />
+          </div>
         </div>
-
+      );
     }
-    else {
-        // Normal group
-        return <div className='dynamicInputs'>
-            {g.properties.map(p => <PropertyComponent key={p.name} property={p} />)}
-        </div>
-    }
+    // Normal group
+    return (
+      <>
+        <Box>
+          {g.group.name && (
+            <Heading as="h3" size="md" mt="8" mb="4">
+              {g.group.name}
+            </Heading>
+          )}
 
-});
+          {g.group.description && (
+            <Text>
+              {g.group.description}
+              {g.group.documentation_link && (
+                <>
+                  {' '}
+                  <Link href={g.group.documentation_link}>Documentation</Link>
+                </>
+              )}
+            </Text>
+          )}
+
+          <div>
+            {
+              <TopicInput
+                properties={g.properties.filter((p) => topicsFields.any((v) => v === p.name))}
+                connectorType={props.connectorType}
+              />
+            }
+            {filteredProperties
+              .filter((p) => topicsFields.every((v) => v !== p.name))
+              .map((p) => (
+                <PropertyComponent key={p.name} property={p} />
+              ))}
+          </div>
+          <Divider my={10} />
+        </Box>
+      </>
+    );
+  },
+);

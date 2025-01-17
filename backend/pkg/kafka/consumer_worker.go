@@ -12,14 +12,25 @@ package kafka
 import (
 	"context"
 	"fmt"
-	"github.com/twmb/franz-go/pkg/kgo"
-	"go.uber.org/zap"
 	"sync"
 	"time"
+
+	"github.com/twmb/franz-go/pkg/kgo"
+	"go.uber.org/zap"
+
+	"github.com/redpanda-data/console/backend/pkg/serde"
 )
 
-func (s *Service) startMessageWorker(ctx context.Context, wg *sync.WaitGroup, isMessageOK isMessageOkFunc, jobs <-chan *kgo.Record, resultsCh chan<- *TopicMessage) {
+func (s *Service) startMessageWorker(ctx context.Context, wg *sync.WaitGroup,
+	isMessageOK isMessageOkFunc, jobs <-chan *kgo.Record, resultsCh chan<- *TopicMessage,
+	consumeReq TopicConsumeRequest,
+) {
 	defer wg.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			s.Logger.Error("recovered from panic in message worker", zap.Any("error", r))
+		}
+	}()
 
 	for record := range jobs {
 		// We consume control records because the last message in a partition we expect might be a control record.
@@ -44,26 +55,35 @@ func (s *Service) startMessageWorker(ctx context.Context, wg *sync.WaitGroup, is
 		}
 
 		// Run Interpreter filter and check if message passes the filter
-		deserializedRec := s.Deserializer.DeserializeRecord(record)
-
-		headersByKey := make(map[string]interface{}, len(deserializedRec.Headers))
-		headers := make([]MessageHeader, 0)
-		for key, header := range deserializedRec.Headers {
-			headersByKey[key] = header.Object
-			headers = append(headers, MessageHeader{
-				Key:   key,
-				Value: header,
+		deserializedRec := s.SerdeService.DeserializeRecord(
+			ctx,
+			record,
+			serde.DeserializationOptions{
+				MaxPayloadSize:     s.Config.Console.MaxDeserializationPayloadSize,
+				Troubleshoot:       consumeReq.Troubleshoot,
+				IncludeRawData:     consumeReq.IncludeRawPayload,
+				IgnoreMaxSizeLimit: consumeReq.IgnoreMaxSizeLimit,
+				KeyEncoding:        consumeReq.KeyDeserializer,
+				ValueEncoding:      consumeReq.ValueDeserializer,
 			})
+
+		headersByKey := make(map[string][]byte, len(deserializedRec.Headers))
+		headers := make([]MessageHeader, 0)
+		for _, header := range deserializedRec.Headers {
+			headersByKey[header.Key] = header.Value
+			headers = append(headers, MessageHeader(header))
 		}
 
 		// Check if message passes filter code
 		args := interpreterArguments{
-			PartitionID:  record.Partition,
-			Offset:       record.Offset,
-			Timestamp:    record.Timestamp,
-			Key:          deserializedRec.Key.Object,
-			Value:        deserializedRec.Value.Object,
-			HeadersByKey: headersByKey,
+			PartitionID:   record.Partition,
+			Offset:        record.Offset,
+			Timestamp:     record.Timestamp,
+			Key:           deserializedRec.Key.DeserializedPayload,
+			Value:         deserializedRec.Value.DeserializedPayload,
+			HeadersByKey:  headersByKey,
+			KeySchemaID:   deserializedRec.Key.SchemaID,
+			ValueSchemaID: deserializedRec.Value.SchemaID,
 		}
 
 		isOK, err := isMessageOK(args)
@@ -82,7 +102,6 @@ func (s *Service) startMessageWorker(ctx context.Context, wg *sync.WaitGroup, is
 			IsTransactional: record.Attrs.IsTransactional(),
 			Key:             deserializedRec.Key,
 			Value:           deserializedRec.Value,
-			IsValueNull:     record.Value == nil,
 			IsMessageOk:     isOK,
 			ErrorMessage:    errMessage,
 			MessageSize:     int64(len(record.Key) + len(record.Value)),

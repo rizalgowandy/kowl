@@ -14,20 +14,20 @@ import (
 	"fmt"
 	"net/http"
 
-	"go.uber.org/zap"
-
 	"github.com/cloudhut/common/rest"
-	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kmsg"
+	"go.uber.org/zap"
 )
 
+// BrokerConfig contains all broker configurations for a broker.
 type BrokerConfig struct {
-	brokerID int32 `json:"-"`
+	brokerID int32 // Don't export brokerID
 
 	Configs []BrokerConfigEntry `json:"configs,omitempty"`
 	Error   string              `json:"error,omitempty"`
 }
 
+// BrokerConfigEntry is all information for a configuration option.
 type BrokerConfigEntry struct {
 	Name   string  `json:"name"`
 	Value  *string `json:"value"` // If value is sensitive this will be nil
@@ -42,14 +42,16 @@ type BrokerConfigEntry struct {
 	Synonyms        []BrokerConfigSynonym `json:"synonyms"`
 }
 
+// BrokerConfigSynonym is a synonyms of a given configuration.
 type BrokerConfigSynonym struct {
 	Name   string  `json:"name"`
 	Value  *string `json:"value"`
 	Source string  `json:"source"`
 }
 
+// GetAllBrokerConfigs retrieves broker configs.
 func (s *Service) GetAllBrokerConfigs(ctx context.Context) (map[int32]BrokerConfig, error) {
-	metadata, err := s.kafkaSvc.GetMetadata(ctx, nil)
+	metadata, err := s.kafkaSvc.GetMetadataTopics(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get broker ids: %w", err)
 	}
@@ -82,6 +84,7 @@ func (s *Service) GetAllBrokerConfigs(ctx context.Context) (map[int32]BrokerConf
 	return configsByBrokerID, nil
 }
 
+// GetBrokerConfig retrieves a specifc broker's configurations.
 func (s *Service) GetBrokerConfig(ctx context.Context, brokerID int32) ([]BrokerConfigEntry, *rest.Error) {
 	res, err := s.kafkaSvc.DescribeBrokerConfig(ctx, brokerID, nil)
 	if err != nil {
@@ -95,7 +98,7 @@ func (s *Service) GetBrokerConfig(ctx context.Context, brokerID int32) ([]Broker
 
 	// Resources should always be of length = 1
 	for _, resource := range res.Resources {
-		err := kerr.TypedErrorForCode(resource.ErrorCode)
+		err := newKafkaErrorWithDynamicMessage(resource.ErrorCode, resource.ErrorMessage)
 		if err != nil {
 			return nil, &rest.Error{
 				Err:      err,
@@ -120,7 +123,7 @@ func (s *Service) GetBrokerConfig(ctx context.Context, brokerID int32) ([]Broker
 				}
 			}
 
-			isExplicitlySet := false
+			var isExplicitlySet bool
 			if cfg.Source == kmsg.ConfigSourceUnknown {
 				// Kafka <v1.1 uses the IsDefault property. Since then it's been replaced by ConfigSource and defaults
 				// to false. Thus we only consider it if cfg.Source is not set / unknown.
@@ -142,13 +145,15 @@ func (s *Service) GetBrokerConfig(ctx context.Context, brokerID int32) ([]Broker
 			}
 		}
 
+		//nolint:staticcheck // The loop is indeed uncondtionally terminated, which is not good,
+		// however we only expect a single iteration because we only requested configs from one broker.
 		return configEntries, nil
 	}
 
 	return nil, &rest.Error{
 		Err:      fmt.Errorf("broker describe config response was empty"),
 		Status:   http.StatusInternalServerError,
-		Message:  "Broker config response was empty",
+		Message:  "BrokerWithLogDirs config response was empty",
 		IsSilent: false,
 	}
 }

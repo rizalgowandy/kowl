@@ -16,27 +16,36 @@ import (
 	"strings"
 
 	"github.com/cloudhut/common/rest"
-	"github.com/cloudhut/kowl/backend/pkg/kafka"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kmsg"
+
+	"github.com/redpanda-data/console/backend/pkg/kafka"
 )
 
+// EditConsumerGroupOffsetsResponse is the sum of all brokers' response shards for
+// requesting a consumer group offset edit.
 type EditConsumerGroupOffsetsResponse struct {
 	Error  string                                  `json:"error,omitempty"`
 	Topics []EditConsumerGroupOffsetsResponseTopic `json:"topics"`
 }
 
+// EditConsumerGroupOffsetsResponseTopic is the topic-scoped response to editing
+// a consumer group's offset.
 type EditConsumerGroupOffsetsResponseTopic struct {
 	TopicName  string                                           `json:"topicName"`
 	Partitions []EditConsumerGroupOffsetsResponseTopicPartition `json:"partitions"`
 }
 
+// EditConsumerGroupOffsetsResponseTopicPartition is the partition-scoped response to editing
+// a consumer group's offset.
 type EditConsumerGroupOffsetsResponseTopicPartition struct {
 	ID    int32  `json:"partitionID"`
 	Error string `json:"error,omitempty"`
 }
 
 // EditConsumerGroupOffsets edits the group offsets of one or more partitions.
+//
+//nolint:cyclop // Eventually this should be refactored to use the franz-go admin client
 func (s *Service) EditConsumerGroupOffsets(ctx context.Context, groupID string, topics []kmsg.OffsetCommitRequestTopic) (*EditConsumerGroupOffsetsResponse, *rest.Error) {
 	// 0. Check if consumer group is empty, otherwise we can't edit the group offsets and want to provide a proper
 	// error message for the frontend.
@@ -91,7 +100,7 @@ func (s *Service) EditConsumerGroupOffsets(ctx context.Context, groupID string, 
 				return nil, &rest.Error{
 					Err:          fmt.Errorf("watermarks for topic '%v' are missing", topic.Topic),
 					Status:       http.StatusServiceUnavailable,
-					Message:      fmt.Sprintf("Can't substitute earliest/oldest offsets due to missing topic watermarks"),
+					Message:      "Can't substitute earliest/oldest offsets due to missing topic watermarks",
 					InternalLogs: nil,
 				}
 			}
@@ -101,7 +110,7 @@ func (s *Service) EditConsumerGroupOffsets(ctx context.Context, groupID string, 
 				return nil, &rest.Error{
 					Err:          fmt.Errorf("watermarks for topic '%v', partition '%v' are missing", topic.Topic, partition.Partition),
 					Status:       http.StatusServiceUnavailable,
-					Message:      fmt.Sprintf("Can't substitute earliest/oldest offsets due to missing partition watermarks"),
+					Message:      "Can't substitute earliest/oldest offsets due to missing partition watermarks",
 					InternalLogs: nil,
 				}
 			}

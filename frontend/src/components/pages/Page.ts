@@ -9,32 +9,39 @@
  * by the Apache License, Version 2.0
  */
 
-import React from "react";
-import { ParsedQuery } from "query-string";
-import { uiState } from "../../state/uiState";
-
+import { makeAutoObservable } from 'mobx';
+import React from 'react';
+import { type BreadcrumbOptions, uiState } from '../../state/uiState';
 
 //
 // Page Types
 //
-export type PageProps<TRouteParams = Record<string, unknown>> = TRouteParams & { matchedPath: string; query: ParsedQuery; }
+export type PageProps<TRouteParams = Record<string, unknown>> = TRouteParams & { matchedPath: string };
 
 export class PageInitHelper {
-    set title(title: string) { uiState.pageTitle = title; }
-    addBreadcrumb(title: string, to: string) { uiState.pageBreadcrumbs.push({ title: title, linkTo: to }) }
+  constructor() {
+    makeAutoObservable(this);
+  }
+  set title(title: string) {
+    uiState.pageTitle = title;
+  }
+  addBreadcrumb(title: string, to: string, heading?: string, options?: BreadcrumbOptions) {
+    uiState.pageBreadcrumbs.push({ title: title, linkTo: to, heading, options });
+  }
 }
-export abstract class PageComponent<TRouteParams = Record<string, unknown>> extends React.Component<PageProps<TRouteParams>> {
+export abstract class PageComponent<TRouteParams = Record<string, unknown>> extends React.Component<
+  PageProps<TRouteParams>
+> {
+  constructor(props: Readonly<PageProps<TRouteParams>>) {
+    super(props);
 
-    constructor(props: Readonly<PageProps<TRouteParams>>) {
-        super(props);
+    uiState.pageBreadcrumbs = [];
 
-        uiState.pageBreadcrumbs = [];
+    this.initPage(new PageInitHelper());
+  }
 
-        this.initPage(new PageInitHelper());
-    }
-
-    abstract initPage(p: PageInitHelper): void;
+  abstract initPage(p: PageInitHelper): void;
 }
-export type PageComponentType<TRouteParams = Record<string, unknown>> = (new (props: PageProps<TRouteParams>) => PageComponent<PageProps<TRouteParams>>);
-
-
+export type PageComponentType<TRouteParams = Record<string, unknown>> = new (
+  props: PageProps<TRouteParams>,
+) => PageComponent<PageProps<TRouteParams>>;

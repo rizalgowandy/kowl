@@ -9,43 +9,75 @@
  * by the Apache License, Version 2.0
  */
 
+import { Box, Flex, Link, Tag, TagLabel, Text } from '@redpanda-data/ui';
+import BoxCard, { type BoxCardProps } from '../../misc/BoxCard';
+import type { HiddenRadioOption } from '../../misc/HiddenRadioList';
 import { findConnectorMetadata, removeNamespace } from './helper';
-import styles from './ConnectorBoxCard.module.scss';
-import React from 'react';
-import BoxCard, { BoxCardProps } from '../../misc/BoxCard';
-import { HiddenRadioOption } from '../../misc/HiddenRadioList';
 
-interface ConnectorBoxCardProps extends Omit<BoxCardProps, "children">, Omit<HiddenRadioOption<string>, "render" | "value"> {
-    connectorPlugin: ConnectorPlugin;
-    id?: string;
+interface ConnectorBoxCardProps
+  extends Omit<BoxCardProps, 'children'>,
+    Omit<HiddenRadioOption<string>, 'render' | 'value'> {
+  connectorPlugin: ConnectorPlugin;
+  id?: string;
 }
 
 export function ConnectorBoxCard(props: ConnectorBoxCardProps) {
-    const { id, checked, connectorPlugin, hoverable, active, borderWidth, borderStyle } = props;
-    return (<BoxCard active={checked || active} hoverable={hoverable} borderStyle={borderStyle} borderWidth={borderWidth} id={id}>
-        <ConnectorRadioCardContent connectorPlugin={connectorPlugin} />
-    </BoxCard>);
+  const { id, checked, connectorPlugin, hoverable, active, borderWidth, borderStyle } = props;
+  return (
+    <BoxCard
+      active={checked || active}
+      hoverable={hoverable}
+      borderStyle={borderStyle}
+      borderWidth={borderWidth}
+      id={id}
+    >
+      <ConnectorRadioCardContent connectorPlugin={connectorPlugin} />
+    </BoxCard>
+  );
 }
 
-export type ConnectorPlugin = { class: string; type?: string; version?: string };
+export type ConnectorPlugin = { class: string; type: 'sink' | 'source'; version?: string };
 
 function ConnectorRadioCardContent({ connectorPlugin }: { connectorPlugin: ConnectorPlugin }) {
-    const { friendlyName, logo, author = 'unknown' } = findConnectorMetadata(connectorPlugin.class) ?? {};
-    const displayName = friendlyName ?? removeNamespace(connectorPlugin.class);
-    const type = connectorPlugin.type ?? 'unknown'
-    const version = connectorPlugin.version ?? 'unknown'
+  const { friendlyName, logo, description, learnMoreLink } = findConnectorMetadata(connectorPlugin.class) ?? {};
+  const displayName = friendlyName ?? removeNamespace(connectorPlugin.class);
+  const type = connectorPlugin.type ?? 'unknown';
 
-    return <div className={styles.radioCardContent}>
-        <span className={styles.radioCardLogo}>{logo}</span>
-        <div className={styles.radioCardInfo}>
-            <strong>{displayName} {connectorPlugin.type != null
-                ? <span className={styles.pluginType}>({type})</span>
-                : null}</strong>
-            {connectorPlugin.version != null
-                ? <p className={styles.pluginMeta}>
-                    Version: {version} | Author: {author}
-                </p>
-                : null}
-        </div>
-    </div>;
+  return (
+    <Flex direction="column">
+      <Box width="32px" height="32px" mb="2">
+        {logo}
+      </Box>
+
+      <Box fontWeight="600" fontSize=".85em">
+        {type === 'source' ? 'Import from' : 'Export to'}
+      </Box>
+
+      <Box fontWeight="600" fontSize="1.1em" mb="2">
+        {displayName}
+      </Box>
+
+      <Text fontSize=".85em" color="gray.500" noOfLines={3}>
+        {description}
+      </Text>
+      {learnMoreLink && (
+        <Box mt="2">
+          <Tag mt="auto">
+            <Link href={learnMoreLink} isExternal opacity=".8">
+              <TagLabel>Documentation</TagLabel>
+            </Link>
+          </Tag>
+        </Box>
+      )}
+    </Flex>
+  );
+}
+
+export function getConnectorFriendlyName(className?: string) {
+  if (!className) return '';
+
+  const { friendlyName } = findConnectorMetadata(className) ?? {};
+  const displayName = friendlyName ?? removeNamespace(className);
+
+  return displayName;
 }

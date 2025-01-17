@@ -10,13 +10,16 @@
 package git
 
 import (
-	"github.com/bmizerany/assert"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+
+	"github.com/redpanda-data/console/backend/pkg/config"
 )
 
 func TestIsValidFileExtension(t *testing.T) {
 	markdownSvc := Service{
-		Cfg: Config{
+		Cfg: config.Git{
 			AllowedFileExtensions: []string{"md"},
 		},
 	}

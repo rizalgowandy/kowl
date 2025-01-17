@@ -17,12 +17,12 @@ import (
 	"time"
 
 	"github.com/cloudhut/common/rest"
-	"github.com/pkg/errors"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kmsg"
 	"go.uber.org/zap"
 )
 
+// TopicDetails contains all a topic's partition metadata (low/high watermark, metadata, log dirs etc).
 type TopicDetails struct {
 	TopicName string `json:"topicName"`
 
@@ -49,6 +49,7 @@ type TopicPartitionDetails struct {
 	PartitionLogDirs []TopicPartitionLogDirs `json:"partitionLogDirs"`
 }
 
+// TopicPartitionMetadata represents the available metadata for a partition.
 type TopicPartitionMetadata struct {
 	ID int32 `json:"id"`
 
@@ -67,8 +68,15 @@ type TopicPartitionMetadata struct {
 
 	// Leader is the broker leader for this partition. This will be -1 on leader / listener error.
 	Leader int32 `json:"leader"`
+
+	// LeaderEpoch, proposed in KIP-320 and introduced in Kafka 2.1.0 is the
+	// epoch of the broker leader.
+	//
+	// This field has a default of -1.
+	LeaderEpoch int32 `json:"leaderEpoch"`
 }
 
+// TopicPartitionMarks contains information about the offsets for a partition.
 type TopicPartitionMarks struct {
 	PartitionID int32 `json:"-"`
 
@@ -82,6 +90,8 @@ type TopicPartitionMarks struct {
 	High int64 `json:"waterMarkHigh"`
 }
 
+// TopicPartitionLogDirs contains the reported log dir size for a single partition as reported by one
+// of the replica brokers.
 type TopicPartitionLogDirs struct {
 	BrokerID    int32  `json:"brokerId"`
 	Error       string `json:"error,omitempty"`
@@ -89,6 +99,8 @@ type TopicPartitionLogDirs struct {
 	Size        int64  `json:"size"`
 }
 
+// TopicPartitionLogDirRequestError is an error reported by a broker whose log dir information request
+// has failed.
 type TopicPartitionLogDirRequestError struct {
 	Error    string `json:"error,omitempty"`
 	BrokerID int32  `json:"brokerId"`
@@ -172,6 +184,7 @@ func (s *Service) GetTopicDetails(ctx context.Context, topicNames []string) ([]T
 					OfflineReplicas: partition.OfflineReplicas,
 					InSyncReplicas:  partition.InSyncReplicas,
 					Leader:          partition.Leader,
+					LeaderEpoch:     partition.LeaderEpoch,
 				},
 				TopicPartitionMarks: &TopicPartitionMarks{
 					PartitionID:     partitionMarks.PartitionID,
@@ -191,7 +204,7 @@ func (s *Service) GetTopicDetails(ctx context.Context, topicNames []string) ([]T
 }
 
 func (s *Service) getTopicPartitionMetadata(ctx context.Context, topicNames []string) (map[string]TopicDetails, *rest.Error) {
-	metadata, err := s.kafkaSvc.GetMetadata(ctx, topicNames)
+	metadata, err := s.kafkaSvc.GetMetadataTopics(ctx, topicNames)
 	if err != nil {
 		return nil, &rest.Error{
 			Err:      err,
@@ -241,6 +254,7 @@ func (s *Service) getTopicPartitionMetadata(ctx context.Context, topicNames []st
 			metadata.InSyncReplicas = partition.ISR
 			metadata.Replicas = partition.Replicas
 			metadata.Leader = partition.Leader
+			metadata.LeaderEpoch = partition.LeaderEpoch
 			metadata.OfflineReplicas = partition.OfflineReplicas
 			partitionInfo[i] = TopicPartitionDetails{
 				&metadata,
@@ -255,6 +269,7 @@ func (s *Service) getTopicPartitionMetadata(ctx context.Context, topicNames []st
 	return overviewByTopic, nil
 }
 
+//nolint:gocognit,cyclop // Eventually this should be refactored to use the franz-go admin client
 func (s *Service) describePartitionLogDirs(ctx context.Context, topicMetadata map[string]TopicDetails) map[string]map[int32][]TopicPartitionLogDirs {
 	// 1. Construct log dir requests and collect all replica ids by partition so that we can later check whether we
 	// successfully described all partition replicas.
@@ -297,8 +312,7 @@ func (s *Service) describePartitionLogDirs(ctx context.Context, topicMetadata ma
 		for _, dir := range resShard.LogDirs.Dirs {
 			err := kerr.ErrorForCode(dir.ErrorCode)
 			if err != nil {
-				wrappedErr := errors.Wrap(err, "failed to describe dir, inner kafka error")
-				errorByBrokerID[brokerID] = wrappedErr
+				errorByBrokerID[brokerID] = fmt.Errorf("failed to describe dir, inner kafka error: %w", err)
 				continue
 			}
 			for _, topic := range dir.Topics {

@@ -12,14 +12,15 @@ package kafka
 import (
 	"context"
 	"fmt"
+	"net/http"
+
 	"github.com/cloudhut/common/rest"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kmsg"
-	"net/http"
 )
 
-// GetMetadata returns some generic information about the brokers in the given cluster
-func (s *Service) GetMetadata(ctx context.Context, topics []string) (*kmsg.MetadataResponse, error) {
+// GetMetadataTopics returns some generic information about the brokers in the given cluster
+func (s *Service) GetMetadataTopics(ctx context.Context, topics []string) (*kmsg.MetadataResponse, error) {
 	metadataRequestTopics := make([]kmsg.MetadataRequestTopic, len(topics))
 	for i, topic := range topics {
 		topicReq := kmsg.NewMetadataRequestTopic()
@@ -39,8 +40,9 @@ func (s *Service) GetMetadata(ctx context.Context, topics []string) (*kmsg.Metad
 	return req.RequestWith(ctx, s.KafkaClient)
 }
 
-func (s *Service) GetSingleMetadata(ctx context.Context, topic string) (kmsg.MetadataResponseTopic, *rest.Error) {
-	metadata, err := s.GetMetadata(ctx, []string{topic})
+// GetSingleTopicMetadata returns metadata for a single topic.
+func (s *Service) GetSingleTopicMetadata(ctx context.Context, topic string) (kmsg.MetadataResponseTopic, *rest.Error) {
+	metadata, err := s.GetMetadataTopics(ctx, []string{topic})
 	if err != nil {
 		return kmsg.MetadataResponseTopic{}, &rest.Error{
 			Err:     err,
@@ -77,4 +79,9 @@ func (s *Service) GetSingleMetadata(ctx context.Context, topic string) (kmsg.Met
 	}
 
 	return topicMetadata, nil
+}
+
+// GetMetadata executes the metadata request.
+func (s *Service) GetMetadata(ctx context.Context, req *kmsg.MetadataRequest) (*kmsg.MetadataResponse, error) {
+	return req.RequestWith(ctx, s.KafkaClient)
 }

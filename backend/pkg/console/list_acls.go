@@ -11,74 +11,115 @@ package console
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
-type AclOverview struct {
-	AclResources        []*AclResource `json:"aclResources"`
+// ACLPrincipalType is the type of principal.
+// Example "User", or "RedpandaRole".
+type ACLPrincipalType string
+
+const (
+	// ACLPrincipalTypeUnknown is the default unknown principal type.
+	ACLPrincipalTypeUnknown ACLPrincipalType = "UNKNOWN"
+	// ACLPrincipalTypeUser is the User principal type.
+	ACLPrincipalTypeUser ACLPrincipalType = "USER"
+	// ACLPrincipalTypeGroup is the Group principal type.
+	ACLPrincipalTypeGroup ACLPrincipalType = "GROUP"
+	// ACLPrincipalTypeRedpandaRole is the RedpandaRole principal type.
+	ACLPrincipalTypeRedpandaRole ACLPrincipalType = "REDPANDA_ROLE"
+)
+
+// ACLOverview contains all acl resources along with the information whether an
+// authorizer is enabled in the target cluster at all.
+type ACLOverview struct {
+	ACLResources        []*ACLResource `json:"aclResources"`
 	IsAuthorizerEnabled bool           `json:"isAuthorizerEnabled"`
+
+	// KafkaResponse is the original Kafka response. This is used by the connect
+	// RPC API as this API has its own mapping logic.
+	KafkaResponse *kmsg.DescribeACLsResponse `json:"-"`
 }
 
-// AclResource is all information we get when listing ACLs
-type AclResource struct {
+// ACLResource is all information we get when listing ACLs
+type ACLResource struct {
 	ResourceType        string     `json:"resourceType"`
 	ResourceName        string     `json:"resourceName"`
 	ResourcePatternType string     `json:"resourcePatternType"`
-	ACLs                []*AclRule `json:"acls"`
+	ACLs                []*ACLRule `json:"acls"`
 }
 
-type AclRule struct {
-	Principal      string `json:"principal"`
-	Host           string `json:"host"`
-	Operation      string `json:"operation"`
-	PermissionType string `json:"permissionType"`
+// ACLRule describes a Kafka ACL rule with all it's properties.
+type ACLRule struct {
+	Principal      string           `json:"principal"`
+	PrincipalType  ACLPrincipalType `json:"principalType"`
+	PrincipalName  string           `json:"principalName"`
+	Host           string           `json:"host"`
+	Operation      string           `json:"operation"`
+	PermissionType string           `json:"permissionType"`
 }
 
 // ListAllACLs returns a list of all stored ACLs.
-func (s *Service) ListAllACLs(ctx context.Context, req kmsg.DescribeACLsRequest) (*AclOverview, error) {
+func (s *Service) ListAllACLs(ctx context.Context, req kmsg.DescribeACLsRequest) (*ACLOverview, error) {
 	aclResponses, err := s.kafkaSvc.ListACLs(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get ACLs from Kafka: %w", err)
 	}
 
-	kafkaErr := kerr.TypedErrorForCode(aclResponses.ErrorCode)
-	if kafkaErr != nil {
-		if kafkaErr == kerr.SecurityDisabled {
-			return &AclOverview{
-				AclResources:        nil,
+	if err := newKafkaErrorWithDynamicMessage(aclResponses.ErrorCode, aclResponses.ErrorMessage); err != nil {
+		if errors.Is(err, kerr.SecurityDisabled) {
+			return &ACLOverview{
+				ACLResources:        nil,
 				IsAuthorizerEnabled: false,
 			}, nil
 		}
-		return nil, fmt.Errorf("failed to get ACLs from Kafka: %v", kafkaErr.Error())
+		return nil, fmt.Errorf("failed to get ACLs from Kafka: %w", err)
 	}
 
-	resources := make([]*AclResource, len(aclResponses.Resources))
+	resources := make([]*ACLResource, len(aclResponses.Resources))
 	for i, aclResponse := range aclResponses.Resources {
-		overview := &AclResource{
+		overview := &ACLResource{
 			ResourceType:        aclResponse.ResourceType.String(),
 			ResourceName:        aclResponse.ResourceName,
 			ResourcePatternType: aclResponse.ResourcePatternType.String(),
 			ACLs:                nil,
 		}
 
-		acls := make([]*AclRule, len(aclResponse.ACLs))
+		acls := make([]*ACLRule, len(aclResponse.ACLs))
 		for j, acl := range aclResponse.ACLs {
-			acls[j] = &AclRule{
+			acls[j] = &ACLRule{
 				Principal:      acl.Principal,
 				Host:           acl.Host,
 				Operation:      acl.Operation.String(),
 				PermissionType: acl.PermissionType.String(),
+			}
+
+			switch {
+			case strings.HasPrefix(acl.Principal, "User:"):
+				acls[j].PrincipalType = ACLPrincipalTypeUser
+				acls[j].PrincipalName = acl.Principal[strings.IndexRune(acl.Principal, ':')+1:]
+			case strings.HasPrefix(acl.Principal, "Group:"):
+				acls[j].PrincipalType = ACLPrincipalTypeGroup
+				acls[j].PrincipalName = acl.Principal[strings.IndexRune(acl.Principal, ':')+1:]
+			case strings.HasPrefix(acl.Principal, "RedpandaRole:"):
+				acls[j].PrincipalType = ACLPrincipalTypeRedpandaRole
+				acls[j].PrincipalName = acl.Principal[strings.IndexRune(acl.Principal, ':')+1:]
+			default:
+				acls[j].PrincipalType = ACLPrincipalTypeUnknown
+				acls[j].PrincipalName = acl.Principal
 			}
 		}
 		overview.ACLs = acls
 		resources[i] = overview
 	}
 
-	return &AclOverview{
-		AclResources:        resources,
+	return &ACLOverview{
+		ACLResources:        resources,
 		IsAuthorizerEnabled: true,
+		KafkaResponse:       aclResponses,
 	}, nil
 }

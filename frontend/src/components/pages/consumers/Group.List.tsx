@@ -9,91 +9,109 @@
  * by the Apache License, Version 2.0
  */
 
-import React from "react";
-import { Table, Empty, Skeleton, Row, Statistic, Tag, Input, Divider, Checkbox } from "antd";
-import { observer } from "mobx-react";
-
-import { api } from "../../../state/backendApi";
-import { PageComponent, PageInitHelper } from "../Page";
-import { GroupMemberDescription, GroupDescription } from "../../../state/restInterfaces";
-import { motion } from "framer-motion";
-import { animProps } from "../../../utils/animationProps";
-import { makePaginationConfig, sortField } from "../../misc/common";
-import { uiSettings } from "../../../state/ui";
-import { appGlobal } from "../../../state/appGlobal";
-import { GroupState } from "./Group.Details";
-import { observable, autorun, IReactionDisposer } from "mobx";
-import { containsIgnoreCase } from "../../../utils/utils";
-import Card from "../../misc/Card";
-import { editQuery } from "../../../utils/queryHelper";
-import { uiState } from "../../../state/uiState";
-import { DefaultSkeleton, Label, OptionGroup } from "../../../utils/tsxUtils";
-import { BrokerList } from "../../misc/BrokerList";
-import { ShortNum } from "../../misc/ShortNum";
-import { KowlTable } from "../../misc/KowlTable";
-
+import { DataTable, Flex, Grid, SearchField, Tag, Text } from '@redpanda-data/ui';
+import { type IReactionDisposer, autorun } from 'mobx';
+import { observer } from 'mobx-react';
+import { Link } from 'react-router-dom';
+import { appGlobal } from '../../../state/appGlobal';
+import { api } from '../../../state/backendApi';
+import type { GroupDescription } from '../../../state/restInterfaces';
+import { uiSettings } from '../../../state/ui';
+import { editQuery } from '../../../utils/queryHelper';
+import { DefaultSkeleton } from '../../../utils/tsxUtils';
+import { BrokerList } from '../../misc/BrokerList';
+import PageContent from '../../misc/PageContent';
+import Section from '../../misc/Section';
+import { ShortNum } from '../../misc/ShortNum';
+import { Statistic } from '../../misc/Statistic';
+import { PageComponent, type PageInitHelper } from '../Page';
+import { GroupState } from './Group.Details';
 
 @observer
 class GroupList extends PageComponent {
+  quickSearchReaction: IReactionDisposer;
 
-    pageConfig = makePaginationConfig(uiSettings.consumerGroupList.pageSize);
-    quickSearchReaction: IReactionDisposer;
+  initPage(p: PageInitHelper): void {
+    p.title = 'Consumer Groups';
+    p.addBreadcrumb('Consumer Groups', '/groups');
 
-    initPage(p: PageInitHelper): void {
-        p.title = 'Consumer Groups';
-        p.addBreadcrumb('Consumer Groups', '/groups');
+    this.refreshData(true);
+    appGlobal.onRefresh = () => this.refreshData(true);
+  }
 
-        this.refreshData(false);
-        appGlobal.onRefresh = () => this.refreshData(true);
+  componentDidMount() {
+    // 1. use 'q' parameter for quick search (if it exists)
+    editQuery((query) => {
+      if (query.q) uiSettings.consumerGroupList.quickSearch = String(query.q);
+    });
+
+    // 2. whenever the quick search box changes, update the url
+    this.quickSearchReaction = autorun(() => {
+      editQuery((query) => {
+        const q = String(uiSettings.consumerGroupList.quickSearch);
+        if (q) query.q = q;
+      });
+    });
+  }
+  componentWillUnmount() {
+    if (this.quickSearchReaction) this.quickSearchReaction();
+  }
+
+  refreshData(force: boolean) {
+    api.refreshConsumerGroups(force);
+  }
+
+  render() {
+    if (!api.consumerGroups) return DefaultSkeleton;
+
+    let groups = Array.from(api.consumerGroups.values());
+
+    try {
+      const quickSearchRegExp = new RegExp(uiSettings.consumerGroupList.quickSearch, 'i');
+      groups = groups.filter(
+        (groupDescription) =>
+          groupDescription.groupId.match(quickSearchRegExp) || groupDescription.protocol.match(quickSearchRegExp),
+      );
+    } catch (e) {
+      console.warn('Invalid expression');
     }
 
-    componentDidMount() {
-        // 1. use 'q' parameter for quick search (if it exists)
-        editQuery(query => {
-            if (query["q"])
-                uiSettings.consumerGroupList.quickSearch = String(query["q"]);
-        });
+    const stateGroups = groups.groupInto((g) => g.state);
 
-        // 2. whenever the quick search box changes, update the url
-        this.quickSearchReaction = autorun(() => {
-            editQuery(query => {
-                const q = String(uiSettings.consumerGroupList.quickSearch);
-                if (q) query["q"] = q;
-            });
-        });
-    }
-    componentWillUnmount() {
-        if (this.quickSearchReaction) this.quickSearchReaction();
-    }
+    return (
+      <>
+        <PageContent>
+          <Section py={4}>
+            <Flex>
+              <Statistic title="Total Groups" value={groups.length} />
+              <div
+                style={{
+                  width: '1px',
+                  background: '#8883',
+                  margin: '0 1.5rem',
+                  marginLeft: 0,
+                }}
+              />
+              {stateGroups.map((g) => (
+                <Statistic key={g.key} title={g.key} value={g.items.length} marginRight={'1.5rem'} />
+              ))}
+            </Flex>
+          </Section>
 
-    refreshData(force: boolean) {
-        api.refreshConsumerGroups(force);
-    }
-
-    render() {
-        if (!api.consumerGroups) return DefaultSkeleton;
-
-        const groups = Array.from(api.consumerGroups.values());
-        const stateGroups = groups.groupInto(g => g.state);
-        const tableSettings = uiSettings.consumerGroupList ?? {};
-
-        return <>
-            <motion.div {...animProps} style={{ margin: '0 1rem' }}>
-                <Card>
-                    <Row>
-                        <Statistic title='Total Groups' value={groups.length} />
-                        <div style={{ width: '1px', background: '#8883', margin: '0 1.5rem', marginLeft: 0 }} />
-                        {stateGroups.map(g =>
-                            <Statistic style={{ marginRight: '1.5rem' }} key={g.key} title={g.key} value={g.items.length} />
-                        )}
-                    </Row>
-                </Card>
-
-                <Card>
-                    {/* Searchbar */} {/* Filters */}
-                    <div style={{ marginBottom: '.5rem', padding: '0', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '2em' }}>
-                        <this.SearchBar />
-                        {/*
+          <Section>
+            {/* Searchbar */} {/* Filters */}
+            <div
+              style={{
+                marginBottom: '.5rem',
+                padding: '0',
+                whiteSpace: 'nowrap',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '2em',
+              }}
+            >
+              <this.SearchBar />
+              {/*
                         <Checkbox
                             value={uiSettings.consumerGroupList.hideEmpty}
                             onChange={c => uiSettings.consumerGroupList.hideEmpty = c.target.checked}
@@ -101,60 +119,90 @@ class GroupList extends PageComponent {
                             Hide Empty
                         </Checkbox>
                         */}
-                    </div>
+            </div>
+            {/* Content */}
+            <DataTable<GroupDescription>
+              data={groups}
+              pagination
+              sorting
+              columns={[
+                {
+                  header: 'State',
+                  accessorKey: 'state',
+                  size: 130,
+                  cell: ({ row: { original } }) => <GroupState group={original} />,
+                },
+                {
+                  header: 'ID',
+                  accessorKey: 'groupId',
+                  cell: ({ row: { original } }) => (
+                    <Link to={`/groups/${encodeURIComponent(original.groupId)}`}>
+                      <this.GroupId group={original} />
+                    </Link>
+                  ),
+                  size: Number.POSITIVE_INFINITY,
+                },
+                {
+                  header: 'Coordinator',
+                  accessorKey: 'coordinatorId',
+                  size: 1,
+                  cell: ({ row: { original } }) => <BrokerList brokerIds={[original.coordinatorId]} />,
+                },
+                {
+                  header: 'Protocol',
+                  accessorKey: 'protocol',
+                  size: 1,
+                },
+                {
+                  header: 'Members',
+                  accessorKey: 'members',
+                  size: 1,
+                  cell: ({ row: { original } }) => original.members.length,
+                },
+                {
+                  header: 'Lag (Sum)',
+                  accessorKey: 'lagSum',
+                  cell: ({ row: { original } }) => ShortNum({ value: original.lagSum }),
+                },
+              ]}
+            />
+          </Section>
+        </PageContent>
+      </>
+    );
+  }
 
-                    {/* Content */}
-                    <KowlTable
-                        dataSource={groups}
-                        columns={[
-                            {
-                                title: 'State', dataIndex: 'state', width: '130px', sorter: sortField('state'), render: (t, r) => <GroupState group={r} />,
-                                filterType: { type: 'enum', }
-                            },
-                            {
-                                title: 'ID', dataIndex: 'groupId',
-                                sorter: sortField('groupId'),
-                                filteredValue: [tableSettings.quickSearch],
-                                onFilter: (filterValue, record: GroupDescription) => (!filterValue) || containsIgnoreCase(record.groupId, String(filterValue)),
-                                render: (t, r) => <this.GroupId group={r} />, className: 'whiteSpaceDefault'
-                            },
-                            { title: 'Coordinator', dataIndex: 'coordinatorId', width: 1, render: (x: number) => <BrokerList brokerIds={[x]} /> },
-                            { title: 'Protocol', dataIndex: 'protocol', width: 1 },
-                            { title: 'Members', dataIndex: 'members', width: 1, render: (t: GroupMemberDescription[]) => t.length, sorter: (a, b) => a.members.length - b.members.length, defaultSortOrder: 'descend' },
-                            { title: 'Lag (Sum)', dataIndex: 'lagSum', render: v => ShortNum({ value: v }), sorter: (a, b) => a.lagSum - b.lagSum },
-                        ]}
+  SearchBar = observer(() => {
+    return (
+      <SearchField
+        width="350px"
+        placeholderText="Enter search term/regex"
+        searchText={uiSettings.consumerGroupList.quickSearch}
+        setSearchText={(x) => (uiSettings.consumerGroupList.quickSearch = x)}
+      />
+    );
+  });
 
-                        observableSettings={tableSettings}
+  GroupId = (p: { group: GroupDescription }) => {
+    const protocol = p.group.protocolType;
 
-                        rowKey={x => x.groupId}
-                        rowClassName="hoverLink"
-                        onRow={(record) =>
-                        ({
-                            onClick: () => appGlobal.history.push('/groups/' + record.groupId),
-                        })}
-                    />
-                </Card>
-            </motion.div>
-        </>;
+    const groupIdEl = (
+      <Text wordBreak="break-word" whiteSpace="break-spaces">
+        {p.group.groupId}
+      </Text>
+    );
+
+    if (protocol === 'consumer') {
+      return groupIdEl;
     }
 
-    SearchBar = observer(() => {
-        return <Input allowClear={true} placeholder='Quick Search' size='large' style={{ width: '350px' }}
-            onChange={e => uiSettings.consumerGroupList.quickSearch = e.target.value}
-            value={uiSettings.consumerGroupList.quickSearch}
-        />
-    })
-
-    GroupId = (p: { group: GroupDescription }) => {
-        const protocol = p.group.protocolType;
-
-        if (protocol == 'consumer') return <>{p.group.groupId}</>;
-
-        return <>
-            <Tag>Protocol: {protocol}</Tag>
-            <span> {p.group.groupId}</span>
-        </>;
-    }
+    return (
+      <Grid templateColumns="auto 1fr" alignItems="center" gap={2}>
+        <Tag>Protocol: {protocol}</Tag>
+        {groupIdEl}
+      </Grid>
+    );
+  };
 }
 
 export default GroupList;

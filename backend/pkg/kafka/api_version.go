@@ -13,13 +13,15 @@ import (
 	"context"
 
 	"github.com/twmb/franz-go/pkg/kmsg"
+
+	"github.com/redpanda-data/console/backend/pkg/version"
 )
 
 // GetAPIVersions returns the supported Kafka API versions
 func (s *Service) GetAPIVersions(ctx context.Context) (*kmsg.ApiVersionsResponse, error) {
 	req := kmsg.NewApiVersionsRequest()
-	req.ClientSoftwareVersion = "NA"
-	req.ClientSoftwareName = "Kowl"
+	req.ClientSoftwareVersion = version.Version
+	req.ClientSoftwareName = "RPConsole"
 
 	return req.RequestWith(ctx, s.KafkaClient)
 }

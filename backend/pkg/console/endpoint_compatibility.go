@@ -15,22 +15,29 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kmsg"
 	"github.com/twmb/franz-go/pkg/kversion"
+
+	"github.com/redpanda-data/console/backend/pkg/protogen/redpanda/api/console/v1alpha1/consolev1alpha1connect"
+	"github.com/redpanda-data/console/backend/pkg/redpanda"
 )
 
+// EndpointCompatibility describes what Console endpoints can be offered to the frontend,
+// based on the supported requests of our upstream systems (Kafka, Redpanda, etc).
 type EndpointCompatibility struct {
 	KafkaClusterVersion string                          `json:"kafkaVersion"`
 	Endpoints           []EndpointCompatibilityEndpoint `json:"endpoints"`
 }
 
+// EndpointCompatibilityEndpoint describes whether a certain endpoint (e.g. GET /topics)
+// is supported or not.
 type EndpointCompatibilityEndpoint struct {
 	Endpoint    string `json:"endpoint"`
 	Method      string `json:"method"`
 	IsSupported bool   `json:"isSupported"`
 }
 
-// GetEndpointCompatibility requests API versions from brokers in order to figure out what Kowl endpoints
+// GetEndpointCompatibility requests API versions from brokers in order to figure out what Console endpoints
 // can be offered to the frontend. If the broker does not support certain features which are required for a
-// Kowl endpoint we can let the frontend know in advance, so that these features will be rendered as
+// Console endpoint we can let the frontend know in advance, so that these features will be rendered as
 // disabled.
 func (s *Service) GetEndpointCompatibility(ctx context.Context) (EndpointCompatibility, error) {
 	versionsRes, err := s.kafkaSvc.GetAPIVersions(ctx)
@@ -42,9 +49,11 @@ func (s *Service) GetEndpointCompatibility(ctx context.Context) (EndpointCompati
 
 	// Required kafka requests per API endpoint
 	type endpoint struct {
-		URL      string
-		Method   string
-		Requests []kmsg.Request
+		URL             string
+		Method          string
+		Requests        []kmsg.Request
+		HasRedpandaAPI  bool
+		RedpandaFeature redpanda.RedpandaFeature
 	}
 	endpointRequirements := []endpoint{
 		{
@@ -70,6 +79,11 @@ func (s *Service) GetEndpointCompatibility(ctx context.Context) (EndpointCompati
 		{
 			URL:      "/api/consumer-groups/{groupId}",
 			Method:   "DELETE",
+			Requests: []kmsg.Request{&kmsg.DeleteGroupsRequest{}},
+		},
+		{
+			URL:      "/api/consumer-groups/{groupId}/offsets",
+			Method:   "DELETE",
 			Requests: []kmsg.Request{&kmsg.OffsetDeleteRequest{}},
 		},
 		{
@@ -87,15 +101,67 @@ func (s *Service) GetEndpointCompatibility(ctx context.Context) (EndpointCompati
 			Method:   "GET",
 			Requests: []kmsg.Request{&kmsg.DescribeClientQuotasRequest{}},
 		},
+		{
+			URL:            "/api/users",
+			Method:         "GET",
+			Requests:       []kmsg.Request{&kmsg.DescribeUserSCRAMCredentialsRequest{}},
+			HasRedpandaAPI: true,
+		},
+		{
+			URL:            "/api/users",
+			Method:         "POST",
+			Requests:       []kmsg.Request{&kmsg.AlterUserSCRAMCredentialsRequest{}},
+			HasRedpandaAPI: true,
+		},
+		{
+			URL:            "/api/users",
+			Method:         "DELETE",
+			Requests:       []kmsg.Request{&kmsg.AlterUserSCRAMCredentialsRequest{}},
+			HasRedpandaAPI: true,
+		},
+		{
+			URL:             consolev1alpha1connect.TransformServiceName,
+			Method:          "POST",
+			HasRedpandaAPI:  true,
+			RedpandaFeature: redpanda.RedpandaFeatureWASMDataTransforms,
+		},
+		{
+			URL:             consolev1alpha1connect.DebugBundleServiceName,
+			Method:          "POST",
+			HasRedpandaAPI:  true,
+			RedpandaFeature: redpanda.RedpandaFeatureDebugBundle,
+		},
 	}
 
 	endpoints := make([]EndpointCompatibilityEndpoint, 0, len(endpointRequirements))
 	for _, endpointReq := range endpointRequirements {
 		endpointSupported := true
+
+		if len(endpointReq.Requests) == 0 {
+			// not a Kafka API endpoint
+			// it requires Redpanda Admin API only
+			// default it to false
+			endpointSupported = false
+		}
+
 		for _, req := range endpointReq.Requests {
 			_, isSupported := versions.LookupMaxKeyVersion(req.Key())
 			if !isSupported {
 				endpointSupported = false
+			}
+		}
+
+		// Some API endpoints may be controllable via the Redpanda Admin API
+		// and the Kafka API. If the Kafka API is not supported, but the same
+		// endpoint is exposed via the Redpanda Admin API, we support
+		// this feature anyways.
+		if endpointReq.HasRedpandaAPI && s.redpandaSvc != nil {
+			endpointSupported = true
+
+			// If we have an actual feature defined that we can check explicitly
+			// lets check that specific feature.
+			if endpointReq.RedpandaFeature != "" {
+				endpointSupported = s.redpandaSvc.CheckFeature(ctx, endpointReq.RedpandaFeature)
 			}
 		}
 
@@ -105,6 +171,13 @@ func (s *Service) GetEndpointCompatibility(ctx context.Context) (EndpointCompati
 			IsSupported: endpointSupported,
 		})
 	}
+
+	// OSS defaults
+	endpoints = append(endpoints, EndpointCompatibilityEndpoint{
+		Endpoint:    consolev1alpha1connect.PipelineServiceName,
+		Method:      "POST",
+		IsSupported: false,
+	})
 
 	return EndpointCompatibility{
 		KafkaClusterVersion: clusterVersion,

@@ -15,9 +15,27 @@ import (
 	"strconv"
 
 	"github.com/cloudhut/common/rest"
-	"github.com/cloudhut/kowl/backend/pkg/console"
-	"github.com/go-chi/chi"
+
+	"github.com/redpanda-data/console/backend/pkg/console"
 )
+
+func (api *API) handleGetBrokers() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		brokers, err := api.ConsoleSvc.GetBrokersWithLogDirs(r.Context())
+		if err != nil {
+			restErr := &rest.Error{
+				Err:      err,
+				Status:   http.StatusBadRequest,
+				Message:  fmt.Sprintf("Failed to retrieve broker list: %v", err.Error()),
+				IsSilent: false,
+			}
+			rest.SendRESTError(w, r, api.Logger, restErr)
+			return
+		}
+
+		rest.SendResponse(w, r, api.Logger, http.StatusOK, brokers)
+	}
+}
 
 func (api *API) handleBrokerConfig() http.HandlerFunc {
 	type response struct {
@@ -26,12 +44,12 @@ func (api *API) handleBrokerConfig() http.HandlerFunc {
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 1. Parse broker ID parameter and validate input
-		brokerIDStr := chi.URLParam(r, "brokerID")
+		brokerIDStr := rest.GetURLParam(r, "brokerID")
 		if brokerIDStr == "" || len(brokerIDStr) > 10 {
 			restErr := &rest.Error{
 				Err:      fmt.Errorf("broker id in URL not set"),
 				Status:   http.StatusBadRequest,
-				Message:  "Broker ID must be set and no longer than 10 characters",
+				Message:  "BrokerWithLogDirs ID must be set and no longer than 10 characters",
 				IsSilent: true,
 			}
 			rest.SendRESTError(w, r, api.Logger, restErr)
@@ -42,7 +60,7 @@ func (api *API) handleBrokerConfig() http.HandlerFunc {
 			restErr := &rest.Error{
 				Err:      fmt.Errorf("broker id in URL not set"),
 				Status:   http.StatusBadRequest,
-				Message:  "Broker ID must be a valid int32",
+				Message:  "BrokerWithLogDirs ID must be a valid int32",
 				IsSilent: true,
 			}
 			rest.SendRESTError(w, r, api.Logger, restErr)

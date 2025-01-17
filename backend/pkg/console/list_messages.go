@@ -15,10 +15,12 @@ import (
 	"math"
 	"time"
 
-	"github.com/cloudhut/kowl/backend/pkg/kafka"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kmsg"
 	"go.uber.org/zap"
+
+	"github.com/redpanda-data/console/backend/pkg/kafka"
+	"github.com/redpanda-data/console/backend/pkg/serde"
 )
 
 const (
@@ -26,13 +28,13 @@ const (
 )
 
 const (
-	// Recent = High water mark - number of results
+	// StartOffsetRecent = High water mark - number of results
 	StartOffsetRecent int64 = -1
-	// Oldest = Low water mark / oldest offset
+	// StartOffsetOldest = Low water mark / oldest offset
 	StartOffsetOldest int64 = -2
-	// Newest = High water mark / Live tail
+	// StartOffsetNewest = High water mark / Live tail
 	StartOffsetNewest int64 = -3
-	// Timestamp = Start offset is specified as unix timestamp in ms
+	// StartOffsetTimestamp = Start offset is specified as unix timestamp in ms
 	StartOffsetTimestamp int64 = -4
 )
 
@@ -44,6 +46,11 @@ type ListMessageRequest struct {
 	StartTimestamp        int64 // Start offset by unix timestamp in ms
 	MessageCount          int
 	FilterInterpreterCode string
+	Troubleshoot          bool
+	IncludeRawPayload     bool
+	IgnoreMaxSizeLimit    bool
+	KeyDeserializer       serde.PayloadEncoding
+	ValueDeserializer     serde.PayloadEncoding
 }
 
 // ListMessageResponse returns the requested kafka messages along with some metadata about the operation
@@ -67,7 +74,7 @@ func (s *Service) ListMessages(ctx context.Context, listReq ListMessageRequest, 
 
 	progress.OnPhase("Get Partitions")
 	// Create array of partitionIDs which shall be consumed (always do that to ensure the requested topic exists at all)
-	metadata, restErr := s.kafkaSvc.GetSingleMetadata(ctx, listReq.TopicName)
+	metadata, restErr := s.kafkaSvc.GetSingleTopicMetadata(ctx, listReq.TopicName)
 	if restErr != nil {
 		return fmt.Errorf("failed to get partitions: %w", restErr.Err)
 	}
@@ -86,7 +93,7 @@ func (s *Service) ListMessages(ctx context.Context, listReq ListMessageRequest, 
 		onlinePartitionIDs = append(onlinePartitionIDs, partition.Partition)
 	}
 
-	partitionIDs := make([]int32, len(onlinePartitionIDs))
+	var partitionIDs []int32
 	if listReq.PartitionID == partitionsAll {
 		if len(offlinePartitionIDs) > 0 {
 			progress.OnError(
@@ -114,9 +121,17 @@ func (s *Service) ListMessages(ctx context.Context, listReq ListMessageRequest, 
 	if err != nil {
 		return fmt.Errorf("failed to get watermarks: %w", err)
 	}
+	for _, mark := range marks {
+		if mark.Error != nil {
+			return fmt.Errorf("failed to get partition offset for partition %d: %w", mark.PartitionID, mark.Error)
+		}
+	}
 
 	// Get partition consume request by calculating start and end offsets for each partition
 	consumeRequests, err := s.calculateConsumeRequests(ctx, &listReq, marks)
+	if err != nil {
+		return fmt.Errorf("failed to calculate consume request: %w", err)
+	}
 	if len(consumeRequests) == 0 {
 		// No partitions/messages to consume, we can quit early.
 		progress.OnComplete(time.Since(start).Milliseconds(), false)
@@ -127,6 +142,11 @@ func (s *Service) ListMessages(ctx context.Context, listReq ListMessageRequest, 
 		MaxMessageCount:       listReq.MessageCount,
 		Partitions:            consumeRequests,
 		FilterInterpreterCode: listReq.FilterInterpreterCode,
+		Troubleshoot:          listReq.Troubleshoot,
+		IncludeRawPayload:     listReq.IncludeRawPayload,
+		IgnoreMaxSizeLimit:    listReq.IgnoreMaxSizeLimit,
+		KeyDeserializer:       listReq.KeyDeserializer,
+		ValueDeserializer:     listReq.ValueDeserializer,
 	}
 
 	progress.OnPhase("Consuming messages")
@@ -150,6 +170,9 @@ func (s *Service) ListMessages(ctx context.Context, listReq ListMessageRequest, 
 // account. Gaps between low and high watermarks (caused by compactions) will be neglected for now.
 // This function will return a map of PartitionConsumeRequests, keyed by the respective PartitionID. An error will
 // be returned if it fails to request the partition offsets for the given timestamp.
+// makes it harder to understand how the consume request is calculated in total though.
+//
+//nolint:cyclop,gocognit // This is indeed a complex function. Breaking this into multiple smaller functions possibly
 func (s *Service) calculateConsumeRequests(ctx context.Context, listReq *ListMessageRequest, marks map[int32]*kafka.PartitionMarks) (map[int32]*kafka.PartitionConsumeRequest, error) {
 	requests := make(map[int32]*kafka.PartitionConsumeRequest, len(marks))
 
@@ -185,15 +208,16 @@ func (s *Service) calculateConsumeRequests(ctx context.Context, listReq *ListMes
 			MaxMessageCount: 0,
 		}
 
-		if listReq.StartOffset == StartOffsetRecent {
+		switch listReq.StartOffset {
+		case StartOffsetRecent:
 			p.StartOffset = mark.High // StartOffset will be recalculated later
-		} else if listReq.StartOffset == StartOffsetOldest {
+		case StartOffsetOldest:
 			p.StartOffset = mark.Low
-		} else if listReq.StartOffset == StartOffsetNewest {
+		case StartOffsetNewest:
 			// In Live tail mode we consume onwards until max results are reached. Start Offset is always high watermark
 			// and end offset is always MaxInt64.
 			p.StartOffset = -1
-		} else if listReq.StartOffset == StartOffsetTimestamp {
+		case StartOffsetTimestamp:
 			// Request start offset by timestamp first and then consider it like a normal forward consuming / custom offset
 			offset, exists := startOffsetByPartitionID[mark.PartitionID]
 			if !exists {
@@ -207,7 +231,7 @@ func (s *Service) calculateConsumeRequests(ctx context.Context, listReq *ListMes
 				offset = marks[mark.PartitionID].High - 1
 			}
 			p.StartOffset = offset
-		} else {
+		default:
 			// Either custom offset or resolved offset by timestamp is given
 			p.StartOffset = listReq.StartOffset
 

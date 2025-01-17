@@ -7,22 +7,26 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0
 
+// Package msgpack provides the deserialization logic for MessagePack encoded
+// payloads.
 package msgpack
 
 import (
 	"regexp"
+
+	"github.com/redpanda-data/console/backend/pkg/config"
 )
 
 // Service represents messagepack cfg, topic name regexes.
 type Service struct {
-	cfg Config
+	cfg config.Msgpack
 
 	AllowedTopicsExpr []*regexp.Regexp
 }
 
 // NewService returns a new instance of Service with compiled regexes.
-func NewService(cfg Config) (*Service, error) {
-	allowedTopicsExpr, err := compileRegexes(cfg.TopicNames)
+func NewService(cfg config.Msgpack) (*Service, error) {
+	allowedTopicsExpr, err := config.CompileRegexes(cfg.TopicNames)
 	if err != nil {
 		return nil, err
 	}
@@ -35,6 +39,10 @@ func NewService(cfg Config) (*Service, error) {
 
 // IsTopicAllowed validates if a topicName is permitted as per the config regexes.
 func (s *Service) IsTopicAllowed(topicName string) bool {
+	if !s.cfg.Enabled {
+		return false
+	}
+
 	isAllowed := false
 	for _, regex := range s.AllowedTopicsExpr {
 		if regex.MatchString(topicName) {

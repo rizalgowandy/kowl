@@ -15,41 +15,63 @@ import (
 	"sync"
 	"sync/atomic"
 
+	con "github.com/cloudhut/connect-client"
 	"go.uber.org/zap"
 
-	con "github.com/cloudhut/connect-client"
+	"github.com/redpanda-data/console/backend/pkg/config"
+	"github.com/redpanda-data/console/backend/pkg/connector/interceptor"
 )
 
+// Service provides the API for interacting with all configured Kafka connect clusters.
 type Service struct {
-	Cfg              Config
-	Logger           *zap.Logger
-	ClientsByCluster map[ /*ClusterName*/ string]*ClientWithConfig
+	Cfg    config.Connect
+	Logger *zap.Logger
+	// ClientsByCluster holds the Client and config. The key is the clusters' name
+	ClientsByCluster map[string]*ClientWithConfig
+	Interceptor      *interceptor.Interceptor
 }
 
+// ClientWithConfig carries the Kafka Connect client, along with the configuration
+// for a single configured Kafka connect cluster.
 type ClientWithConfig struct {
 	Client *con.Client
-	Cfg    ConfigCluster
+	Cfg    config.ConnectCluster
 }
 
-func NewService(cfg Config, logger *zap.Logger) (*Service, error) {
-	logger.Info("creating Kafka connect HTTP clients and testing connectivity to all clusters")
+// NewService creates a new connect.Service. It tests the connectivity for each configured
+// Kafka connect cluster proactively.
+func NewService(cfg config.Connect, logger *zap.Logger) (*Service, error) {
+	clientsByCluster := make(map[string]*ClientWithConfig)
+
+	if len(cfg.Clusters) == 0 {
+		return &Service{
+			Cfg:              cfg,
+			Logger:           logger,
+			ClientsByCluster: clientsByCluster,
+			Interceptor:      interceptor.NewInterceptor(),
+		}, nil
+	}
 
 	// 1. Create a client for each configured Connect cluster
-	clientsByCluster := make(map[string]*ClientWithConfig)
+	logger.Info("creating Kafka connect HTTP clients and testing connectivity to all clusters")
+
 	for _, clusterCfg := range cfg.Clusters {
 		// Create dedicated Connect HTTP Client for each cluster
 		childLogger := logger.With(
 			zap.String("cluster_name", clusterCfg.Name),
 			zap.String("cluster_address", clusterCfg.URL))
 
-		opts := []con.ClientOption{con.WithTimeout(cfg.ReadTimeout), con.WithUserAgent("Kowl")}
+		opts := []con.ClientOption{
+			con.WithTimeout(cfg.ReadTimeout),
+			con.WithUserAgent("Redpanda Console"),
+		}
 
 		opts = append(opts, con.WithHost(clusterCfg.URL))
 		// TLS Config
 		tlsCfg, err := clusterCfg.TLS.TLSConfig()
 		if err != nil {
 			childLogger.Error("failed to create TLS config for Kafka connect HTTP client, fallback to default TLS config", zap.Error(err))
-			tlsCfg = &tls.Config{}
+			tlsCfg = &tls.Config{MinVersion: tls.VersionTLS12}
 		}
 		opts = append(opts, con.WithTLSConfig(tlsCfg))
 
@@ -70,10 +92,12 @@ func NewService(cfg Config, logger *zap.Logger) (*Service, error) {
 			Cfg:    clusterCfg,
 		}
 	}
+
 	svc := &Service{
 		Cfg:              cfg,
 		Logger:           logger,
 		ClientsByCluster: clientsByCluster,
+		Interceptor:      interceptor.NewInterceptor(),
 	}
 
 	// 2. Test connectivity against each cluster concurrently
@@ -83,11 +107,7 @@ func NewService(cfg Config, logger *zap.Logger) (*Service, error) {
 
 	logger.Info("successfully create Kafka connect service")
 
-	return &Service{
-		Cfg:              cfg,
-		Logger:           logger,
-		ClientsByCluster: clientsByCluster,
-	}, nil
+	return svc, nil
 }
 
 // TestConnectivity will send to each Kafka connect client a request to check if it is reachable. If a cluster is not
@@ -97,7 +117,7 @@ func (s *Service) TestConnectivity(ctx context.Context) {
 	wg := sync.WaitGroup{}
 	for _, clientInfo := range s.ClientsByCluster {
 		wg.Add(1)
-		go func(cfg ConfigCluster, c *con.Client) {
+		go func(cfg config.ConnectCluster, c *con.Client) {
 			defer wg.Done()
 			_, err := c.GetRoot(ctx)
 			if err != nil {

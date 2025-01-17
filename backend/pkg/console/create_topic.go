@@ -15,7 +15,6 @@ import (
 	"net/http"
 
 	"github.com/cloudhut/common/rest"
-	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kmsg"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -36,6 +35,7 @@ type CreateTopicResponseConfig struct {
 	Value *string `json:"value"`
 }
 
+// CreateTopic creates a Kafka topic.
 func (s *Service) CreateTopic(ctx context.Context, createTopicReq kmsg.CreateTopicsRequestTopic) (CreateTopicResponse, *rest.Error) {
 	internalLogs := []zapcore.Field{
 		zap.String("topic_name", createTopicReq.Topic),
@@ -43,7 +43,11 @@ func (s *Service) CreateTopic(ctx context.Context, createTopicReq kmsg.CreateTop
 		zap.Int16("replication_factor", createTopicReq.ReplicationFactor),
 		zap.Int("configuration_count", len(createTopicReq.Configs)),
 	}
-	createTopicRes, err := s.kafkaSvc.CreateTopic(ctx, createTopicReq)
+
+	req := kmsg.NewCreateTopicsRequest()
+	req.Topics = []kmsg.CreateTopicsRequestTopic{createTopicReq}
+
+	createRes, err := s.kafkaSvc.CreateTopics(ctx, &req)
 	if err != nil {
 		return CreateTopicResponse{}, &rest.Error{
 			Err:          fmt.Errorf("failed to create topic: %w", err),
@@ -54,12 +58,23 @@ func (s *Service) CreateTopic(ctx context.Context, createTopicReq kmsg.CreateTop
 		}
 	}
 
-	err = kerr.ErrorForCode(createTopicRes.ErrorCode)
-	if err != nil {
+	if len(createRes.Topics) != 1 {
 		return CreateTopicResponse{}, &rest.Error{
-			Err:          fmt.Errorf("failed to create topic, inner kafka error: %w", err),
+			Err:          fmt.Errorf("unexpected number of topic responses, expected exactly one but got '%v'", len(createRes.Topics)),
+			Status:       http.StatusInternalServerError,
+			Message:      fmt.Sprintf("unexpected number of topic responses, expected exactly one but got '%v'", len(createRes.Topics)),
+			InternalLogs: internalLogs,
+			IsSilent:     false,
+		}
+	}
+
+	createTopicRes := createRes.Topics[0]
+	kafkaErr := newKafkaErrorWithDynamicMessage(createTopicRes.ErrorCode, createTopicRes.ErrorMessage)
+	if kafkaErr != nil {
+		return CreateTopicResponse{}, &rest.Error{
+			Err:          fmt.Errorf("failed to create topic, inner kafka error: %w", kafkaErr),
 			Status:       http.StatusServiceUnavailable,
-			Message:      fmt.Sprintf("Failed to create topic, kafka responded with the following error: %v", err.Error()),
+			Message:      fmt.Sprintf("Failed to create topic, kafka responded with the following error: %v", kafkaErr.Error()),
 			InternalLogs: internalLogs,
 			IsSilent:     false,
 		}
@@ -79,4 +94,9 @@ func (s *Service) CreateTopic(ctx context.Context, createTopicReq kmsg.CreateTop
 		ReplicationFactor:          createTopicRes.ReplicationFactor,
 		CreateTopicResponseConfigs: configs,
 	}, nil
+}
+
+// CreateTopics proxies the create topic request to the Kafka client.
+func (s *Service) CreateTopics(ctx context.Context, createReq *kmsg.CreateTopicsRequest) (*kmsg.CreateTopicsResponse, error) {
+	return s.kafkaSvc.CreateTopics(ctx, createReq)
 }

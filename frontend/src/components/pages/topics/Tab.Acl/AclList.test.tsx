@@ -9,64 +9,69 @@
  * by the Apache License, Version 2.0
  */
 
-import React from 'react';
-import { render } from '@testing-library/react';
-import AclList from './AclList';
+import { render, screen } from '@testing-library/react';
 import { observable } from 'mobx';
-import { ResourcePatternType } from '../../../../state/restInterfaces';
+import React from 'react';
+import type {
+  AclStrOperation,
+  AclStrPermission,
+  AclStrResourceType,
+  GetAclOverviewResponse,
+} from '../../../../state/restInterfaces';
+import AclList from './AclList';
 
-it('renders an empty table when no data is present', () => {
+describe('AclList', () => {
+  test('renders an empty table when no data is present', () => {
     const store = observable({
-        isAuthorizerEnabled: true,
-        aclResources: [],
+      isAuthorizerEnabled: true,
+      aclResources: [],
     });
 
-    const { getByText } = render(<AclList acl={store} />);
-    expect(getByText('No Data')).toBeInTheDocument();
-});
+    render(<AclList acl={store} />);
+    expect(screen.getByText('No data found')).toBeInTheDocument();
+  });
 
-it('a table with one entry', () => {
+  test('a table with one entry', () => {
     const store = observable({
-        isAuthorizerEnabled: true,
-        aclResources: [
+      isAuthorizerEnabled: true,
+      aclResources: [
+        {
+          resourceType: 'Topic' as AclStrResourceType,
+          resourceName: 'Test Topic',
+          resourcePatternType: 'Unknown',
+          acls: [
             {
-                resourceType: 'Topic',
-                resourceName: 'Test Topic',
-                resourcePatternType: ResourcePatternType.UNKNOWN,
-                acls: [
-                    {
-                        principal: 'test principal',
-                        host: 'test host',
-                        operation: 'test operation',
-                        permissionType: 'test permission type',
-                    },
-                ],
+              principal: 'test principal',
+              host: '*',
+              operation: 'All' as AclStrOperation,
+              permissionType: 'Allow' as AclStrPermission,
             },
-        ],
-    });
+          ],
+        },
+      ],
+    } as GetAclOverviewResponse);
 
-    const { getByText } = render(<AclList acl={store} />);
+    render(<AclList acl={store} />);
 
-    expect(getByText('Topic')).toBeInTheDocument();
-    expect(getByText('Test Topic')).toBeInTheDocument();
-    expect(getByText('0')).toBeInTheDocument();
-    expect(getByText('test principal')).toBeInTheDocument();
-    expect(getByText('test host')).toBeInTheDocument();
-    expect(getByText('test operation')).toBeInTheDocument();
-    expect(getByText('test permission type')).toBeInTheDocument();
-});
+    expect(screen.getByText('Topic')).toBeInTheDocument();
+    expect(screen.getByText('Test Topic')).toBeInTheDocument();
+    expect(screen.getByText('test principal')).toBeInTheDocument();
+    expect(screen.getByText('All')).toBeInTheDocument();
+    expect(screen.getByText('Allow')).toBeInTheDocument();
+  });
 
-it('informs user about missing permission to view ACLs', () => {
-    const { getByText } = render(<AclList acl={null} />);
-    expect(getByText('You do not have the necessary permissions to view ACLs')).toBeInTheDocument();
-});
+  test('informs user about missing permission to view ACLs', () => {
+    render(<AclList acl={null} />);
+    expect(screen.getByText('You do not have the necessary permissions to view ACLs')).toBeInTheDocument();
+  });
 
-it('informs user about missing authorizer config in Kafka cluster', () => {
+  test('informs user about missing authorizer config in Kafka cluster', () => {
     const store = observable({
-        isAuthorizerEnabled: false,
-        aclResources: [],
+      isAuthorizerEnabled: false,
+      aclResources: [],
     });
 
-    const { getByText } = render(<AclList acl={store} />);
-    expect(getByText("There's no authorizer configured in your Kafka cluster")).toBeInTheDocument();
+    render(<AclList acl={store} />);
+    expect(screen.getByText("There's no authorizer configured in your Kafka cluster")).toBeInTheDocument();
+  });
 });

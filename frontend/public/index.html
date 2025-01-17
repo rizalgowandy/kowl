@@ -13,10 +13,12 @@
 <html lang="en">
 
 <head>
+    <!-- fix https://github.com/webpack/webpack/issues/2882 -->
+    <base href="/" />
+    <!-- end fix https://github.com/webpack/webpack/issues/2882 -->
     <meta charset="utf-8" />
-    <title>Kowl</title>
+    <title>Redpanda Console</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#000000" />
     <meta name="description" content="WebApp to explore Kafka Messages, Topics, ..." />
 
     <!-- Unused for now -->
@@ -25,26 +27,24 @@
 
     <script>
         {
-            basePath = "__BASE_PATH_REPLACE_MARKER__";
-            window["BASE_URL"] = basePath;
+            let basePath = window["BASE_URL"] = "__BASE_PATH_REPLACE_MARKER__";
+            window["ENABLED_FEATURES"] = "__FEATURES_REPLACE_MARKER__";
 
             window.__getLocation = function () {
                 return window.location;
             };
             let l = window.__getLocation();
-            let base = document.createElement('base');
+            let base = document.querySelector('base');
             if (!basePath.startsWith('__BASE')) {
                 base.href = l.protocol + '//' + l.hostname + (l.port ? (':' + l.port) : '') + basePath;
             } else {
                 base.href = l.protocol + '//' + l.hostname + (l.port ? (':' + l.port) : '') + '/';
             }
-            document.head.appendChild(base);
         }
     </script>
 
-    <link rel="icon" type="image/png" sizes="32x32" href="./favicon-32x32.png" />
-    <link rel="icon" type="image/x-icon" href="./favicon.ico" />
-    <link rel="icon" type="image/png" sizes="620x620" href="./favicon.png" />
+    <!-- <link rel="icon" type="image/x-icon" href="./favicon.ico" /> -->
+    <link rel="icon" type="image/png" sizes="384x384" href="./favicon-32.png" />
 </head>
 
 <body>
